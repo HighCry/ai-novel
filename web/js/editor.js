@@ -1,6 +1,6 @@
 import { api, streamInto } from './api.js';
 import { store, on, emit, scope, chapterLabel, reload } from './store.js';
-import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, countWords, themeButton, moreButton } from './ui.js';
+import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, countWords, themeButton, moreButton, icon, pushLayer } from './ui.js';
 import { renderPanels } from './panels.js';
 import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette } from './dialogs.js';
 import { attachAssist, pref } from './assist.js';
@@ -11,6 +11,7 @@ let els = {};
 let dirty = false;
 let saving = null;
 let assist = null;
+let drawerLayer = null;
 const autosave = debounce(() => save().catch(() => {}), 1500);
 
 export function renderEditor(root) {
@@ -27,6 +28,8 @@ export function renderEditor(root) {
   buildMain(main);
   renderSidebar(sidebar);
   renderPanels(panel);
+  panel.prepend(h('div', { class: 'drawer-head' }, h('b', null, 'AI 助手'), h('button', { class: 'icon-btn', title: '收起', onclick: closeDrawers }, icon('close'))));
+  scope.add(() => { drawerLayer?.(); drawerLayer = null; });
 
   scope.add(on('chapters-changed', () => { renderSidebar(sidebar); updateNum(); fillVolumes(store.chapter?.volume_id); }));
   scope.add(on('entries-changed', () => assist?.setEntities()));
@@ -59,6 +62,7 @@ export function renderEditor(root) {
 function topBar(layout) {
   els.bookTitle = h('button', { class: 'book-title', title: '作品设定', onclick: () => openBookSettings() }, store.book.title);
   const actions = h('div', { class: 'top-actions' },
+    h('button', { class: 'ghost mobile-only', onclick: () => openPalette() }, '搜索章节和设定'),
     h('button', { class: 'ghost', onclick: () => openBookSettings() }, '作品设定'),
     h('button', { class: 'ghost', title: '整屏阅读正文，左右方向键翻章', onclick: () => openReader() }, '阅读'),
     h('button', { class: 'ghost', onclick: () => openExport() }, '导出'),
@@ -75,19 +79,31 @@ function topBar(layout) {
   const drawer = (name, other) => () => {
     layout.classList.remove(other);
     layout.classList.toggle(name);
+    syncDrawerLayer();
   };
   return h('header', { class: 'topbar' },
-    h('button', { class: 'ghost', title: '回到书架', onclick: () => emit('go-shelf') }, h('span', { class: 'desk-only' }, '← 书架'), h('span', { class: 'mobile-only' }, '←')),
+    h('button', { class: 'ghost', title: '回到书架', onclick: () => emit('go-shelf') }, h('span', { class: 'desk-only' }, '← 书架'), h('span', { class: 'mobile-only' }, icon('back'))),
     els.bookTitle,
     h('div', { class: 'spacer' }),
     actions,
-    h('button', { class: 'ghost mobile-only', onclick: drawer('show-side', 'show-panel') }, '目录'),
-    h('button', { class: 'ghost mobile-only', onclick: drawer('show-panel', 'show-side') }, '助手'),
+    h('button', { class: 'ghost mobile-only tool', onclick: drawer('show-side', 'show-panel') }, icon('list'), '目录'),
+    h('button', { class: 'ghost mobile-only tool', onclick: drawer('show-panel', 'show-side') }, icon('spark'), '助手'),
     moreButton(actions));
+}
+
+function syncDrawerLayer() {
+  const open = !!els.layout?.matches('.show-side, .show-panel');
+  if (open && !drawerLayer) {
+    drawerLayer = pushLayer(closeDrawers);
+  } else if (!open && drawerLayer) {
+    drawerLayer();
+    drawerLayer = null;
+  }
 }
 
 function closeDrawers() {
   els.layout?.classList.remove('show-side', 'show-panel');
+  syncDrawerLayer();
 }
 
 function buildMain(main) {
@@ -125,7 +141,9 @@ function buildMain(main) {
   els.text = h('textarea', {
     class: 'ch-text',
     spellcheck: false,
-    placeholder: '开始写作……\n\nCtrl+Enter：AI 在光标处给出灰色的续写，Tab 采纳，Esc 取消\n在新的一行打 / 或 、：描写、对话、打斗、起名等指令；打 @ 插入设定里的名字\n选中一段文字：润色、扩写、精简，或收藏到文风库\nCtrl+S 保存，Ctrl+K 搜索命令和章节',
+    placeholder: matchMedia('(pointer: coarse)').matches
+      ? '开始写作……\n\n在新的一行打 / 或 、：描写、对话、打斗、起名等指令；打 @ 插入设定里的名字\n选中一段文字：润色、扩写、精简，或收藏到文风库'
+      : '开始写作……\n\nCtrl+Enter：AI 在光标处给出灰色的续写，Tab 采纳，Esc 取消\n在新的一行打 / 或 、：描写、对话、打斗、起名等指令；打 @ 插入设定里的名字\n选中一段文字：润色、扩写、精简，或收藏到文风库\nCtrl+S 保存，Ctrl+K 搜索命令和章节',
     oninput: () => { markDirty(); updateCount(); },
     onselect: updateSel,
     onkeyup: updateSel,
@@ -143,6 +161,7 @@ function buildMain(main) {
     },
   }, '高亮设定');
   els.count = h('span');
+  els.aiCount = h('span', { class: 'desk-only' });
   els.sel = h('span', { class: 'muted' });
   els.saved = h('span', { class: 'saved' });
   els.paper = h('div', { class: 'paper' },
@@ -160,11 +179,11 @@ function buildMain(main) {
       h('button', { class: 'btn primary', onclick: () => addChapter() }, '＋ 新建第一章'),
       h('button', { class: 'btn', onclick: () => openPlanner() }, '✦ 让 AI 规划章纲')));
   const ghostBtn = h('button', {
-    class: 'ghost small mobile-only',
+    class: 'ghost small mobile-only pill',
     title: '在光标处让 AI 给出灰色的续写',
     onclick: () => { els.text.focus(); assist?.triggerGhost(); },
-  }, '✦ 续写一句');
-  main.append(els.empty, els.paper, h('div', { class: 'statusbar' }, els.count, els.sel, h('div', { class: 'spacer' }), ghostBtn, els.saved));
+  }, icon('spark'), '续写一句');
+  main.append(els.empty, els.paper, h('div', { class: 'statusbar' }, els.count, els.aiCount, els.sel, h('div', { class: 'spacer' }), ghostBtn, els.saved));
   store.editor = editorApi;
   assist = attachAssist(els.text, els.wrap);
 }
@@ -238,11 +257,13 @@ async function openChapter(id) {
   els.title.value = ch.title;
   els.outline.value = ch.outline;
   els.beats.value = ch.beats || '';
-  els.beatsBox.open = !!(ch.beats || '').trim();
+  // 手机屏幕矮：已有正文时把章纲、节拍收起来，先露出正文
+  const compact = matchMedia('(max-width: 760px)').matches && !!ch.content.trim();
+  els.beatsBox.open = !compact && !!(ch.beats || '').trim();
   els.text.value = ch.content;
   els.status.value = ch.status === 'done' ? 'done' : 'draft';
   fillVolumes(ch.volume_id);
-  els.outlineBox.open = !!ch.outline.trim() || !ch.content.trim();
+  els.outlineBox.open = !compact && (!!ch.outline.trim() || !ch.content.trim());
   dirty = false;
   autosave.cancel();
   els.saved.textContent = '已保存';
@@ -282,7 +303,8 @@ function updateCount() {
   const n = countWords(els.text.value);
   const target = store.book.target_words || 0;
   const ai = store.chapter.ai_chars || 0;
-  els.count.textContent = `本章 ${n} 字` + (target ? ` / 目标 ${target}` : '') + (ai ? ` · 采纳 AI ${ai} 字` : '');
+  els.count.textContent = `本章 ${n} 字` + (target ? ` / 目标 ${target}` : '');
+  els.aiCount.textContent = ai ? `采纳 AI ${ai} 字` : '';
   els.count.classList.toggle('reached', !!target && n >= target);
 }
 
@@ -410,14 +432,15 @@ function renderSidebar(el) {
       h('b', null, '目录'),
       h('div', { class: 'row tight' },
         h('button', { class: 'mini', title: '新建一卷', onclick: addVolume }, '＋卷'),
-        h('button', { class: 'mini primary', title: '在最后一卷末尾新建章节', onclick: () => addChapter() }, '＋章'))),
+        h('button', { class: 'mini primary', title: '在最后一卷末尾新建章节', onclick: () => addChapter() }, '＋章'),
+        h('button', { class: 'icon-btn mobile-only drawer-close', title: '收起', onclick: closeDrawers }, icon('close')))),
     tree,
     h('div', { class: 'side-foot' },
       h('button', { class: 'btn block', onclick: () => openPlanner() }, '✦ AI 规划后续章纲'),
       h('div', { class: 'row tight' },
         h('button', { class: 'btn grow', title: '给有章纲、没正文的章节依次规划节拍并起草', onclick: () => openBatchDraft() }, '批量起草'),
         h('button', { class: 'btn grow', title: '一次给多章生成摘要、提取设定和张力，适合导入旧稿后建档', onclick: () => openBatchFinalize() }, '批量定稿')),
-      h('div', { class: 'muted small center' }, 'Ctrl+K 搜索命令和章节'),
+      h('div', { class: 'muted small center desk-only' }, 'Ctrl+K 搜索命令和章节'),
       h('div', { class: 'muted small center' }, `${store.chapters.length} 章 · ${fmtWords(total)} 字`)));
 }
 

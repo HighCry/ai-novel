@@ -19,6 +19,46 @@ export function h(tag, attrs, ...children) {
   return el;
 }
 
+const ICONS = {
+  back: 'M15 18l-6-6 6-6',
+  close: 'M18 6 6 18M6 6l12 12',
+  list: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
+  spark: 'M12 3.5l1.8 4.9 4.9 1.8-4.9 1.8L12 16.9l-1.8-4.9-4.9-1.8 4.9-1.8zM18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z',
+  more: 'M12 5.5h.01M12 12h.01M12 18.5h.01',
+};
+
+/** 线条图标（SVG 不能用 h() 创建，要走 createElementNS） */
+export function icon(name) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'ico ico-' + name);
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', ICONS[name]);
+  svg.append(path);
+  return svg;
+}
+
+const layers = [];
+
+/** 登记一个能被安卓返回键关掉的浮层（弹窗、抽屉、阅读页…），返回注销函数；自己关闭时要调用它 */
+export function pushLayer(close) {
+  layers.push(close);
+  return () => {
+    const i = layers.lastIndexOf(close);
+    if (i >= 0) layers.splice(i, 1);
+  };
+}
+
+/** 关掉最上层的浮层；没有浮层时返回 false。先出栈再关，关闭函数出错也不会卡住返回键 */
+export function closeTopLayer() {
+  const close = layers.pop();
+  if (!close) return false;
+  close();
+  return true;
+}
+
 export function toast(msg, type = 'info', ms = 2800) {
   const el = h('div', { class: 'toast ' + type }, msg);
   document.getElementById('toasts').append(el);
@@ -32,6 +72,7 @@ export function modal({ title, body, actions = [], wide = false, onClose } = {})
   const close = () => {
     if (closed) return;
     closed = true;
+    unlayer();
     overlay.remove();
     document.removeEventListener('keydown', onKey);
     onClose?.();
@@ -46,11 +87,12 @@ export function modal({ title, body, actions = [], wide = false, onClose } = {})
   setActions(actions);
   const bodyEl = h('div', { class: 'modal-body' }, body);
   const box = h('div', { class: 'modal' + (wide === 'xl' ? ' xl' : wide ? ' wide' : '') },
-    h('div', { class: 'modal-head' }, h('h3', null, title), h('button', { class: 'icon-btn', title: '关闭（Esc）', onclick: close }, '✕')),
+    h('div', { class: 'modal-head' }, h('h3', null, title), h('button', { class: 'icon-btn', title: '关闭（Esc）', onclick: close }, icon('close'))),
     bodyEl, foot);
   const overlay = h('div', { class: 'overlay' }, box);
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
+  const unlayer = pushLayer(close);
   return { close, box, body: bodyEl, setActions };
 }
 
@@ -214,15 +256,17 @@ export function themeButton() {
   return btn;
 }
 
-/** 手机状态栏的颜色跟着主题走 */
+/** 手机状态栏的颜色跟着主题走；在安卓 App 里还要让原生壳切换状态栏图标的深浅 */
 export function syncThemeColor() {
+  const css = getComputedStyle(document.documentElement);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim() || '#fffdf8';
+  if (meta) meta.content = css.getPropertyValue('--surface').trim() || '#fffdf8';
+  window.AiNovelAndroid?.setTheme(document.documentElement.dataset.theme === 'dark', css.getPropertyValue('--bg').trim());
 }
 
 /** 手机上顶栏放不下，把次要按钮收进「⋯」菜单（点菜单外或点了菜单里的按钮就收起，见 app.js） */
 export function moreButton(menu) {
-  return h('button', { class: 'ghost mobile-only more-btn', title: '更多', onclick: () => menu.classList.toggle('open') }, '⋯');
+  return h('button', { class: 'ghost mobile-only more-btn', title: '更多', onclick: () => menu.classList.toggle('open') }, icon('more'));
 }
 
 /** 按分句做 LCS 对比，返回 [{type:'eq',text}|{type:'chg',del,ins,on}]，用于修订模式逐条采纳 */

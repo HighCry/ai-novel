@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 web/css/app.css 里的页面背景色（bg 变量）一致，启动时不闪白 -->
+    <color name="paper">#F3EFE6</color>
+</resources>

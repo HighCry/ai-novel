@@ -1,6 +1,6 @@
 import { api, streamInto } from './api.js';
 import { store, emit, reload, chapterLabel } from './store.js';
-import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, fmtWords, readFile, pickFile, KIND, CHAR_FIELDS, ROLES, renderMarkdown, cleanAi, countWords } from './ui.js';
+import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, fmtWords, readFile, pickFile, KIND, CHAR_FIELDS, ROLES, renderMarkdown, cleanAi, countWords, pushLayer } from './ui.js';
 import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
 
@@ -1075,7 +1075,7 @@ export function openPalette() {
   let filtered = items;
   let active = 0;
   const list = h('div', { class: 'palette-list' });
-  const close = () => { overlay.remove(); };
+  const close = () => { unlayer(); overlay.remove(); };
   const pick = (it) => { close(); it.run(); };
   const draw = () => {
     list.innerHTML = '';
@@ -1099,6 +1099,7 @@ export function openPalette() {
   });
   const overlay = h('div', { class: 'palette' }, h('div', { class: 'palette-box' }, input, list));
   document.body.append(overlay);
+  const unlayer = pushLayer(close);
   draw();
   input.focus();
 }

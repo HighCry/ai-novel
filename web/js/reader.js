@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import { store, chapterLabel } from './store.js';
-import { h, toast } from './ui.js';
+import { h, toast, icon, pushLayer } from './ui.js';
 
 /** 阅读模式：整屏看正文，上一章 / 下一章翻页 */
 export async function openReader() {
@@ -25,6 +25,7 @@ export async function openReader() {
     localStorage.setItem('readerSize', String(size));
   };
   const close = () => {
+    unlayer();
     el.remove();
     document.removeEventListener('keydown', onKey);
   };
@@ -35,7 +36,7 @@ export async function openReader() {
   };
   const el = h('div', { class: 'reader' },
     h('div', { class: 'reader-head' },
-      h('button', { class: 'icon-btn', title: '关闭（Esc）', onclick: close }, '✕'),
+      h('button', { class: 'icon-btn', title: '返回（Esc）', onclick: close }, icon('back')),
       title,
       h('button', { class: 'mini', title: '字小一点', onclick: () => setSize(-1) }, 'A−'),
       h('button', { class: 'mini', title: '字大一点', onclick: () => setSize(1) }, 'A+')),
@@ -43,6 +44,7 @@ export async function openReader() {
     h('div', { class: 'reader-foot' }, prev, pos, next));
   document.body.append(el);
   document.addEventListener('keydown', onKey);
+  const unlayer = pushLayer(close);
   setSize(0);
   go(index);
 
