@@ -38,6 +38,17 @@ if ($ABIS -notcontains 'arm64-v8a') { throw "缺少原生库：$OUT\arm64-v8a\li
 if (!(Test-Path $ANDJAR)) { throw "缺少 android.jar：$ANDJAR" }
 Write-Host "版本 $VersionName（versionCode $VersionCode），打包 ABI: $($ABIS -join ', ')"
 
+# 原生库比 Rust 源码旧时只警告不中断：git checkout 等操作也会刷新 mtime，可能误报。
+$srcNewest = @(Get-ChildItem -Recurse -File (Join-Path $REPO 'src'), (Join-Path $ROOT 'jni\src') -Filter *.rs -ErrorAction SilentlyContinue) +
+             @(Get-Item (Join-Path $REPO 'Cargo.lock'), (Join-Path $ROOT 'jni\Cargo.lock') -ErrorAction SilentlyContinue) |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+foreach ($abi in $ABIS) {
+    $so = Get-Item (Join-Path $OUT "$abi\libainovel.so")
+    if ($srcNewest -and $so.LastWriteTime -lt $srcNewest.LastWriteTime) {
+        Write-Warning "$abi 的 libainovel.so（$($so.LastWriteTime)）比 $($srcNewest.Name)（$($srcNewest.LastWriteTime)）旧，APK 可能不含最新改动；先在 android\jni 下运行 cargo ndk -o out -t $abi -P 24 build --release"
+    }
+}
+
 Remove-Item -Recurse -Force $B -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$B\classes","$B\dex","$B\staging" | Out-Null
 foreach ($abi in $ABIS) { New-Item -ItemType Directory -Force -Path "$B\staging\lib\$abi" | Out-Null }
