@@ -13,14 +13,21 @@ if (-not $JAVA) { $JAVA = 'C:\Program Files\Microsoft\jdk-21.0.11.10-hotspot\' }
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path   # ...\ai-novel\android
 $APP  = Join-Path $ROOT 'app'
 $MAIN = Join-Path $APP 'src\main'
-$SO   = Join-Path $ROOT 'jni\out\arm64-v8a\libainovel.so'
+$OUT  = Join-Path $ROOT 'jni\out'
 $B    = Join-Path $APP 'build'
 
-if (!(Test-Path $SO))     { throw "缺少原生库：$SO（先运行 cargo ndk 交叉编译）" }
+# 收集已交叉编译出的 ABI：arm64-v8a 必需（真机），x86_64 可选（模拟器）。
+$ABIS = @()
+foreach ($abi in 'arm64-v8a','x86_64') {
+    if (Test-Path (Join-Path $OUT "$abi\libainovel.so")) { $ABIS += $abi }
+}
+if ($ABIS -notcontains 'arm64-v8a') { throw "缺少原生库：$OUT\arm64-v8a\libainovel.so（先运行 cargo ndk 交叉编译）" }
 if (!(Test-Path $ANDJAR)) { throw "缺少 android.jar：$ANDJAR" }
+Write-Host "打包 ABI: $($ABIS -join ', ')"
 
 Remove-Item -Recurse -Force $B -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path "$B\classes","$B\dex","$B\staging\lib\arm64-v8a" | Out-Null
+New-Item -ItemType Directory -Force -Path "$B\classes","$B\dex","$B\staging" | Out-Null
+foreach ($abi in $ABIS) { New-Item -ItemType Directory -Force -Path "$B\staging\lib\$abi" | Out-Null }
 
 Write-Host '[1/7] javac 编译 Java'
 $javac = Join-Path $JAVA 'bin\javac.exe'
@@ -37,9 +44,9 @@ Write-Host '[3/7] aapt2 link 打包清单与资源'
 & (Join-Path $BT 'aapt2.exe') link -o "$B\base.apk" -I $ANDJAR --manifest "$MAIN\AndroidManifest.xml" --min-sdk-version 24 --target-sdk-version 35
 if ($LASTEXITCODE) { throw 'aapt2 link 失败' }
 
-Write-Host '[4/7] 塞入 classes.dex 和 libainovel.so'
+Write-Host '[4/7] 塞入 classes.dex 和各 ABI 的 libainovel.so'
 Copy-Item "$B\dex\classes.dex" "$B\staging\classes.dex" -Force
-Copy-Item $SO "$B\staging\lib\arm64-v8a\libainovel.so" -Force
+foreach ($abi in $ABIS) { Copy-Item (Join-Path $OUT "$abi\libainovel.so") "$B\staging\lib\$abi\libainovel.so" -Force }
 Copy-Item "$B\base.apk" "$B\unsigned.apk" -Force
 Push-Location "$B\staging"
 & (Join-Path $JAVA 'bin\jar.exe') uf "$B\unsigned.apk" classes.dex lib
