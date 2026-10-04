@@ -1,0 +1,12 @@
+services:
+  ai-novel:
+    build: .
+    container_name: ai-novel
+    ports:
+      # 只映射到本机；要在局域网访问，改成 "8686:8686" 并设置下面的密码
+      - "127.0.0.1:8686:8686"
+    volumes:
+      - ./data:/data
+    environment:
+      - AI_NOVEL_PASSWORD=${AI_NOVEL_PASSWORD:-}
+    restart: unless-stopped

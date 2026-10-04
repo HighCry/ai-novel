@@ -1,0 +1,58 @@
+[package]
+name = "ai-novel"
+version = "0.5.0"
+edition = "2021"
+description = "AI 小说工坊：本地运行的长篇网文 AI 辅助写作应用"
+license = "AGPL-3.0-or-later"
+
+[lib]
+name = "ai_novel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-novel"
+path = "src/main.rs"
+
+# 桌面版：自带窗口（WebView2），不用打开浏览器。cargo build --release --features desktop --bin ai-novel-desktop
+[[bin]]
+name = "ai-novel-desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]
+
+[features]
+desktop = ["dep:wry", "dep:tao", "dep:windows-sys"]
+
+[dependencies]
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", optional = true }
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+encoding_rs = "0.8"
+futures-util = "0.3"
+mime_guess = "2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+
+[build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

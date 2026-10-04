@@ -1,0 +1,30 @@
+# ---- Rust ----
+target/
+
+# ---- App runtime data & databases ----
+/data
+*.db
+*.db-shm
+*.db-wal
+
+# ---- Build artifacts ----
+/AI小说工坊.exe
+android/app/build/
+android/jni/out/
+*.apk
+*.so
+*.dex
+*.class
+
+# ---- Signing (generated debug cert) ----
+*.keystore
+
+# ---- Logs ----
+*.log
+
+# ---- Node (web tooling, if ever added) ----
+node_modules/
+
+# ---- OS / editor cruft ----
+Thumbs.db
+.DS_Store
