@@ -11,6 +11,7 @@ target/
 /AI小说工坊.exe
 android/app/build/
 android/jni/out/
+android/dist/
 *.apk
 *.so
 *.dex
