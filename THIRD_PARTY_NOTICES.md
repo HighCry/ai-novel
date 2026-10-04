@@ -26,6 +26,8 @@
 | --- | --- | --- | --- |
 | `src/continuity.rs` | [mrigankad/Novel-OS](https://github.com/mrigankad/Novel-OS) `core/continuity_engine.py` | MIT | 确定性连续性检查的检查项和阈值（伏笔沉寂、人物缺席、已死亡人物出场、人物信息单薄），用 Rust 重新实现 |
 | `src/lint.rs` | novel-studio `anti-ai-writing.md` | Apache-2.0 | 高频套话、弱化副词密度、意义膨胀、万能结论、论文体、书面连词、解释腔/上帝视角等检查规则 |
+| `src/lint.rs` | [worldwonderer/oh-story-claudecode](https://github.com/worldwonderer/oh-story-claudecode) `skills/story-deslop/references/banned-words.md`、`SKILL.md` | MIT | 一级禁用词、“不是A而是B”等高频模板句（只查引号外叙述）、章末预告检测，以及按每千字命中数分轻度/中度/重度的阈值和对应的删减上限 |
+| `src/skills/deslop.md`（内置技能「网文去AI味」） | oh-story-claudecode `skills/story-deslop/`（`SKILL.md`、`references/anti-ai-writing.md`、`references/banned-words.md`）；novel-studio `anti-ai-writing.md` | MIT / Apache-2.0 | 写作规则（深度限知视角、逗号长句的句长基准、禁用句式和词表）、去 AI 三遍法、防止矫枉过正的条目和改写范例，按本项目的用法重写和精简 |
 | `src/prompts.rs` | webnovel-writer `agents/reviewer.md`、`references/shared/cool-points-guide.md`；novel-studio `hooks-chapter.md` | GPL-3.0 / Apache-2.0 | 一致性检查的五个类别与“只报有证据的问题”原则；节拍规划中的爽点三段式、章末钩子类型；章节张力分析的爽点与钩子分类 |
 | 人物结构化状态 | StoryForge 角色动态状态 6 字段 | MIT | 字段设计（位置、实力、身体、心理、关键物品、近期经历），另加“知道的秘密 / 还不知道的事” |
 
@@ -35,4 +37,4 @@ StoryForge 的 README 声明 “MIT License”，但仓库（2026-05-17 的提�
 
 ## 只借鉴思路、没有使用其代码或文本的项目
 
-[MaoXiaoYuZ/Long-Novel-GPT](https://github.com/MaoXiaoYuZ/Long-Novel-GPT)（未声明许可证）、[aiyinluya/wenmai](https://github.com/aiyinluya/wenmai)（未附许可证）、[QishanHe/PlotPilot](https://github.com/QishanHe/PlotPilot)（Apache-2.0 + Commons Clause，与 AGPL 不兼容），以及 Novelcrafter、Sudowrite 等商业产品。
+[blader/humanizer](https://github.com/blader/humanizer)（MIT，借鉴“改完后再自问哪里还像 AI”的复查思路）、[sam-paech/slop-score](https://github.com/sam-paech/slop-score)（按密度而不是分类器衡量 AI 腔的思路）、[MaoXiaoYuZ/Long-Novel-GPT](https://github.com/MaoXiaoYuZ/Long-Novel-GPT)（未声明许可证）、[aiyinluya/wenmai](https://github.com/aiyinluya/wenmai)（未附许可证）、[QishanHe/PlotPilot](https://github.com/QishanHe/PlotPilot)（Apache-2.0 + Commons Clause，与 AGPL 不兼容），以及 Novelcrafter、Sudowrite 等商业产品。

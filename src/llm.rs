@@ -74,7 +74,7 @@ pub enum LlmEvent {
     Error(String),
 }
 
-const CANCELLED: &str = "客户端已断开，生成中止";
+pub const CANCELLED: &str = "客户端已断开，生成中止";
 
 /// 用户填的接口地址可能带或不带 /chat/completions，这里统一成 base + path。
 pub fn endpoint(base_url: &str, path: &str) -> String {

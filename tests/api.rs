@@ -574,3 +574,72 @@ async fn password_protection() {
     let resp = http.get(format!("http://{addr}/api/health")).basic_auth("me", Some("wrong")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+#[tokio::test]
+async fn writing_skills_flow() {
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+
+    // 内置的「网文去AI味」默认启用
+    let list = c.get("/api/skills").await;
+    assert_eq!(list[0]["id"], "deslop");
+    assert_eq!(list[0]["builtin"], true);
+    assert_eq!(list[0]["active"], true);
+    assert_eq!(list[0]["has_rules"], true);
+    assert_eq!(c.get("/api/settings").await["skills"], json!(["deslop"]));
+
+    // 导入一份 SKILL.md 格式的技能并启用
+    let md = "---\nname: 对话加强\ndescription: |\n  让人物说话更像人。\n---\n# 对话加强\n\n## 写作规则\n台词里多用省略和反问，少用“说道”。\n\n## 修订流程\n把书面腔的台词改成口语。";
+    let created = c.post("/api/skills", json!({ "markdown": md, "source": "对话加强.md" })).await;
+    let sid = created["card"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["card"]["name"], "对话加强");
+    assert_eq!(created["card"]["description"], "让人物说话更像人。");
+    assert_eq!(created["card"]["source"], "对话加强.md");
+    assert_eq!(created["card"]["active"], false);
+    let active = c.put(&format!("/api/skills/{sid}/active"), json!({ "active": true })).await;
+    assert_eq!(active["active"], json!(["deslop", sid]));
+
+    // 内置技能不能改、不能删
+    let (status, _) = c.send(reqwest::Method::DELETE, "/api/skills/deslop", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = c.send(reqwest::Method::PUT, "/api/skills/deslop", Some(json!({ "markdown": md }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 写正文时系统提示里带上启用技能的写作规则，不带修订流程
+    let book = c.post("/api/books", json!({ "title": "技能测试", "genre": "都市" })).await;
+    let bid = book["id"].as_i64().unwrap();
+    let ch = c
+        .post(&format!("/api/books/{bid}/chapters"), json!({ "title": "第一章", "outline": "主角进城", "content": "他嘴角勾起一抹冷笑，眼中闪过一丝不屑。她不是害怕，而是愤怒。" }))
+        .await;
+    let cid = ch["id"].as_i64().unwrap();
+    let pv = c.post("/api/ai/preview", json!({ "task": "write_chapter", "book_id": bid, "chapter_id": cid })).await;
+    let system = pv["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains("【写作技能") && system.contains("《网文去AI味》") && system.contains("《对话加强》"), "{system}");
+    assert!(system.contains("少用“说道”") && !system.contains("把书面腔的台词改成口语"));
+
+    // 技能修订：系统提示附整份技能，用户提示带本地检测结果
+    let pv = c.post("/api/ai/preview", json!({ "task": "deslop", "book_id": bid, "chapter_id": cid })).await;
+    let system = pv["messages"][0]["content"].as_str().unwrap();
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    assert!(system.contains("【本次修订使用的技能：《网文去AI味》】") && system.contains("三遍法"), "{system}");
+    assert!(user.contains("AI味：") && user.contains("嘴角勾起") && user.contains("不是害怕，而是"), "{user}");
+    assert!(user.contains("【需要修订的正文】") && user.contains("眼中闪过一丝不屑"));
+    let pv = c.post("/api/ai/preview", json!({ "task": "deslop", "book_id": bid, "chapter_id": cid, "skill": sid, "selection": "“我认为此事不妥。”他说道。" })).await;
+    assert!(pv["messages"][0]["content"].as_str().unwrap().contains("《对话加强》】"));
+    assert!(pv["messages"][1]["content"].as_str().unwrap().contains("我认为此事不妥"));
+    let (status, _) =
+        c.send(reqwest::Method::POST, "/api/ai/preview", Some(json!({ "task": "deslop", "book_id": bid, "chapter_id": cid, "skill": "nope" }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 修改保留来源；删除后从启用列表里移除
+    let edited = c.put(&format!("/api/skills/{sid}"), json!({ "markdown": md.replace("对话加强\ndescription", "台词口语化\ndescription") })).await;
+    assert_eq!(edited["card"]["name"], "台词口语化");
+    assert_eq!(edited["card"]["source"], "对话加强.md");
+    let del = c.ok(reqwest::Method::DELETE, &format!("/api/skills/{sid}"), None).await;
+    assert_eq!(del["active"], json!(["deslop"]));
+    assert_eq!(c.get("/api/skills").await.as_array().unwrap().len(), 1);
+
+    // 贴进来的是网页而不是 Markdown 时给出明确提示
+    let (status, v) = c.send(reqwest::Method::POST, "/api/skills", Some(json!({ "markdown": "<!DOCTYPE html><html></html>" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+}

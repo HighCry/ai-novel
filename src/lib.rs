@@ -12,6 +12,8 @@ pub mod llm;
 pub mod memory;
 pub mod models;
 pub mod prompts;
+pub mod skillapi;
+pub mod skills;
 pub mod state;
 pub mod stylelib;
 pub mod text;
@@ -81,7 +83,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/library/guide/distill", post(libapi::distill_guide))
         .route("/library/guide/{id}/restore", post(libapi::restore_guide))
         .route("/library/{id}", get(libapi::get_item).patch(libapi::patch_item).delete(libapi::delete_item))
-        .route("/library/{id}/analyze", post(libapi::analyze_item));
+        .route("/library/{id}/analyze", post(libapi::analyze_item))
+        .route("/skills", get(skillapi::list_skills).post(skillapi::create_skill))
+        .route("/skills/{id}", get(skillapi::get_skill).put(skillapi::update_skill).delete(skillapi::delete_skill))
+        .route("/skills/{id}/active", axum::routing::put(skillapi::set_active));
 
     Router::new()
         .nest("/api", api)

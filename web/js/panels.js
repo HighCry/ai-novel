@@ -1,10 +1,10 @@
 import { api, stream } from './api.js';
 import { store, on, emit, scope, chapterLabel, modelReady } from './store.js';
 import { h, toast, busy, cleanAi, copyText, countWords, KIND, keywords, diffClauses, applyDiff } from './ui.js';
-import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations } from './dialogs.js';
+import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations, openSkills } from './dialogs.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
-const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色' };
+const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味' };
 const SELECT_TASKS = ['expand', 'shorten', 'rewrite', 'polish'];
 
 let container = null;
@@ -64,10 +64,27 @@ function buildAi() {
   const words = h('input', { type: 'number', min: 100, max: 8000, step: 100, value: 800, class: 'num', title: '续写的目标字数' });
   const variants = h('select', { title: '同时生成几个版本对比挑选' }, [1, 2, 3].map((n) => h('option', { value: n }, n === 1 ? '1 个版本' : `${n} 个版本对比`)));
   const outputs = h('div', { class: 'outputs' });
+  const skillSel = h('select', { class: 'skill-select', title: '去 AI 味时按哪个写作技能修订', onchange: () => localStorage.setItem('reviseSkill', skillSel.value) });
+  const fillSkills = async () => {
+    let list;
+    try { list = await api.get('/skills'); } catch { return; }
+    const keep = localStorage.getItem('reviseSkill') || 'deslop';
+    skillSel.replaceChildren(...list.map((s) => h('option', { value: s.id, selected: s.id === keep }, s.name)));
+  };
+  fillSkills();
+  scope.add(on('skills-changed', fillSkills));
   let lastTask = 'continue';
-  const run = (task) => {
+  const run = (task, extra = {}) => {
     lastTask = task;
-    return generate(task, { instruction: instruction.value.trim(), words: Number(words.value) || 800, variants: Number(variants.value) || 1, outputs });
+    return generate(task, {
+      instruction: instruction.value.trim(),
+      words: Number(words.value) || 800,
+      variants: Number(variants.value) || 1,
+      outputs,
+      skill: skillSel.value || 'deslop',
+      skillName: skillSel.selectedOptions[0]?.textContent || '',
+      ...extra,
+    });
   };
   const finale = h('label', { class: 'check', title: '写整章和规划节拍时按全书最后一章处理，回收所有未回收的伏笔' },
     h('input', { type: 'checkbox', checked: !!store.finale, onchange: (e) => { store.finale = e.target.checked; } }), '这是大结局');
@@ -80,6 +97,7 @@ function buildAi() {
       const sel = store.editor.selection();
       const body = { task: lastTask, book_id: store.book.id, chapter_id: store.chapter.id, instruction: instruction.value.trim(), words: Number(words.value) || 800, finale: !!store.finale };
       if (SELECT_TASKS.includes(lastTask)) Object.assign(body, { selection: sel.text || '（这里是选中的文字）', before: sel.before, after: sel.after });
+      if (lastTask === 'deslop') Object.assign(body, sel.text ? { selection: sel.text, before: sel.before, after: sel.after } : { selection: store.editor.text() }, { skill: skillSel.value });
       if (lastTask === 'continue') Object.assign(body, { before: store.editor.text().slice(0, sel.end), after: store.editor.text().slice(sel.end) });
       openPreview(body);
     },
@@ -92,6 +110,14 @@ function buildAi() {
       h('button', { class: 'btn', title: '按本章章纲写出整章初稿', onclick: () => run('write_chapter') }, '写整章')),
     groupTitle('选中正文里的一段后'),
     h('div', { class: 'btn-grid four' }, SELECT_TASKS.map((t) => h('button', { class: 'btn', onclick: () => run(t) }, TASK_LABEL[t]))),
+    groupTitle('去 AI 味'),
+    h('div', { class: 'btn-grid' },
+      h('button', { class: 'btn', title: '按写作技能和本地检测结果修订整章，改动可以逐句选择', onclick: () => run('deslop') }, '整章去 AI 味'),
+      h('button', { class: 'btn', title: '只修订正文里选中的段落', onclick: () => run('deslop', { selectionOnly: true }) }, '选中段去 AI 味')),
+    h('div', { class: 'row' },
+      h('label', { class: 'inline' }, '按技能 ', skillSel),
+      h('span', { class: 'spacer' }),
+      h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); openSkills(); } }, '管理写作技能')),
     instruction,
     h('div', { class: 'chips' }, chips),
     h('div', { class: 'row' }, h('label', { class: 'inline' }, '续写字数 ', words), variants),
@@ -105,38 +131,46 @@ function buildAi() {
   return el;
 }
 
-async function generate(task, { instruction, words, variants, outputs }) {
+async function generate(task, { instruction, words, variants, outputs, skill, skillName, selectionOnly }) {
   const ed = store.editor;
   const ch = store.chapter;
   if (!ch || !ed) return toast('请先打开一个章节', 'warn');
   if (!modelReady()) { toast('请先在设置里配置模型', 'warn'); openSettings(); return; }
-  const sel = ed.selection();
-  const needSel = SELECT_TASKS.includes(task);
+  let sel = ed.selection();
+  const needSel = SELECT_TASKS.includes(task) || (task === 'deslop' && selectionOnly);
   if (needSel && !sel.text.trim()) return toast('请先在正文里选中一段文字', 'warn');
+  if (task === 'deslop' && !selectionOnly) {
+    const all = ed.text();
+    if (!all.trim()) return toast('这一章还没有正文', 'warn');
+    sel = { start: 0, end: all.length, text: all, before: '', after: '' };
+  }
   try { await ed.save(); } catch { return; }
   const body = { task, book_id: store.book.id, chapter_id: ch.id, instruction, finale: !!store.finale };
   if (task === 'continue') {
     body.before = ed.text().slice(0, sel.end);
     body.after = ed.text().slice(sel.end);
     body.words = words;
-  } else if (needSel) {
+  } else if (needSel || task === 'deslop') {
     Object.assign(body, { selection: sel.text, before: sel.before, after: sel.after });
   }
+  if (task === 'deslop') body.skill = skill;
   outputs.querySelectorAll('.out-card.finished').forEach((c) => c.remove());
-  for (let i = 0; i < variants; i++) runVariant({ ...body, variant: i }, sel, outputs, i, variants);
+  for (let i = 0; i < variants; i++) runVariant({ ...body, variant: i }, sel, outputs, i, variants, task === 'deslop' ? skillName : '');
 }
 
-function runVariant(body, sel, outputs, i, n) {
+function runVariant(body, sel, outputs, i, n, note = '') {
   const ctrl = new AbortController();
   const textEl = h('div', { class: 'out-text' });
   const status = h('span', { class: 'out-status' }, '连接中…');
   const stopBtn = h('button', { class: 'mini', onclick: () => ctrl.abort() }, '停止');
   const actions = h('div', { class: 'out-actions' });
   const refsEl = h('div', { class: 'out-refs', hidden: true });
-  const title = (n > 1 ? `版本 ${i + 1} · ` : '') + TASK_LABEL[body.task];
-  const card = h('div', { class: 'out-card' }, h('div', { class: 'out-head' }, h('b', null, title), status, stopBtn), refsEl, textEl, actions);
+  const warnEl = h('div', { class: 'out-warn', hidden: true });
+  const title = (n > 1 ? `版本 ${i + 1} · ` : '') + TASK_LABEL[body.task] + (note ? ` · ${note}` : '');
+  const card = h('div', { class: 'out-card' }, h('div', { class: 'out-head' }, h('b', null, title), status, stopBtn), refsEl, warnEl, textEl, actions);
   outputs.prepend(card);
   let thinking = 0;
+  let revise = null;
   stream(body, {
     signal: ctrl.signal,
     onMeta: (m) => {
@@ -145,6 +179,7 @@ function runVariant(body, sel, outputs, i, n) {
       if (m.guide) parts.push('已用文风指南');
       refsEl.textContent = parts.join(' · ');
       refsEl.hidden = !parts.length;
+      revise = m.revise || null;
     },
     onDelta: (_, full) => {
       textEl.textContent = full;
@@ -187,6 +222,7 @@ function runVariant(body, sel, outputs, i, n) {
           p.del ? h('del', null, p.del) : null, p.ins ? h('ins', null, p.ins) : null);
         textEl.append(chg);
       }
+      checkLoss();
     };
     draw();
   }
@@ -199,10 +235,17 @@ function runVariant(body, sel, outputs, i, n) {
     const end = () => ed().text().length;
     // 每个按钮：[文字, 放进正文的操作, 会被替换的范围（用来记录采纳位置，供学习作者的修改）]
     const btns = [];
-    if (SELECT_TASKS.includes(body.task)) {
-      btns.push(['替换选中', () => ed().replaceRange(sel.start, sel.end, get(), sel.text), () => [sel.start, sel.end]]);
+    if (SELECT_TASKS.includes(body.task) || body.task === 'deslop') {
+      const whole = body.task === 'deslop' && !sel.before && !sel.after;
+      btns.push([whole ? '替换全文' : '替换选中', () => ed().replaceRange(sel.start, sel.end, get(), sel.text), () => [sel.start, sel.end]]);
       const toggle = h('button', { class: 'mini', title: '按句对比原文和修改，逐条决定采纳哪些', onclick: () => { showDiff(!diffParts); toggle.textContent = diffParts ? '退出修订' : '修订模式'; } }, '修订模式');
       actions.append(toggle);
+      // 去 AI 味直接进修订模式：改了哪些一目了然，不想要的点一下改回原文
+      if (body.task === 'deslop' && textEl.innerText.trim()) {
+        showDiff(true);
+        toggle.textContent = '退出修订';
+        compareAi();
+      }
     }
     if (body.task === 'continue') btns.push(['插入到光标处', () => ed().insertAt(sel.end, get()), () => [sel.end, sel.end]]);
     if (body.task === 'write_chapter') {
@@ -218,6 +261,31 @@ function runVariant(body, sel, outputs, i, n) {
 
   function get() { return diffParts ? applyDiff(diffParts) : cleanAi(textEl.innerText); }
 
+  /** 去 AI 味：按当前采纳的修改算删减比例，核对设定词有没有被改掉；返回删减百分比 */
+  function checkLoss() {
+    if (!revise) return null;
+    const after = get();
+    const len = (s) => s.replace(/\s/g, '').length;
+    const cut = Math.round((1 - len(after) / Math.max(1, len(sel.text))) * 100);
+    const lost = (revise.keep || []).filter((t) => sel.text.includes(t) && !after.includes(t));
+    const limit = parseInt(revise.max_cut, 10) || 25;
+    const warns = [];
+    if (cut > limit) warns.push(`删减了 ${cut}%，超过这一档 ${limit}% 的上限，可能删掉了有用的信息。`);
+    if (cut < -5) warns.push(`修改稿比原文长了 ${-cut}%，可能补写了原文没有的情节、细节或台词。`);
+    if (lost.length) warns.push(`这些设定词在修改稿里不见了：${lost.join('、')}。`);
+    warnEl.textContent = warns.length ? warns.join('') + '在修订模式里点一下对应的修改，就能改回原文。' : '';
+    warnEl.hidden = !warns.length;
+    return cut;
+  }
+
+  async function compareAi() {
+    const cut = checkLoss();
+    try {
+      const [a, b] = await Promise.all([api.post('/lint', { text: sel.text }), api.post('/lint', { text: get() })]);
+      status.textContent = `AI 味 ${a.ai_level} ${a.ai_density.toFixed(1)} → ${b.ai_level} ${b.ai_density.toFixed(1)}` + (cut == null ? '' : cut >= 0 ? ` · 删减 ${cut}%` : ` · 增加 ${-cut}%`);
+    } catch { /* 对比失败不影响结果本身 */ }
+  }
+
   async function accept(apply, range) {
     if (store.chapter?.id !== body.chapter_id) return toast('当前打开的不是生成时的章节，可以复制后手动粘贴', 'warn', 4000);
     const text = get();
@@ -228,9 +296,12 @@ function runVariant(body, sel, outputs, i, n) {
     const where = { before: v.slice(Math.max(0, s - 30), s), after: v.slice(e, e + 30) };
     if (!apply()) return;
     try { await store.editor.save({ snapshot: `AI ${TASK_LABEL[body.task]}前` }); } catch { return; }
-    api.post(`/chapters/${body.chapter_id}/ai_accept`, { chars: countWords(text), text, task: body.task, ...where })
-      .then(() => { store.chapter.ai_chars = (store.chapter.ai_chars || 0) + countWords(text); store.editor.refreshCount(); })
-      .catch(() => {});
+    // 去 AI 味只是改原文，不算新采纳的 AI 字数，也不拿来学习作者的改法
+    if (body.task !== 'deslop') {
+      api.post(`/chapters/${body.chapter_id}/ai_accept`, { chars: countWords(text), text, task: body.task, ...where })
+        .then(() => { store.chapter.ai_chars = (store.chapter.ai_chars || 0) + countWords(text); store.editor.refreshCount(); })
+        .catch(() => {});
+    }
     outputs.querySelectorAll('.out-card.finished').forEach((c) => c.remove());
     toast('已放进正文（修改前的内容已存快照，可在「历史」恢复）');
   }
@@ -406,6 +477,10 @@ async function runLint(out) {
   const s = r.stats;
   out.append(
     h('div', { class: 'score-line' }, h('span', { class: 'score ' + (r.score >= 85 ? 'good' : r.score >= 65 ? 'mid' : 'bad') }, r.score), h('span', null, '文字质量分（本地规则估算）')),
+    h('div', { class: 'score-line' },
+      h('span', { class: 'ai-level ' + (r.ai_level === '轻度' ? 'good' : r.ai_level === '中度' ? 'mid' : 'bad') }, `AI 味${r.ai_level}`),
+      h('span', { class: 'grow small muted' }, `每千字约 ${r.ai_density.toFixed(1)} 处套话和模板句`),
+      h('button', { class: 'mini primary', title: '按写作技能修订整章，改动可以逐句选择', onclick: () => emit('ai-run', 'deslop') }, '去 AI 味')),
     h('div', { class: 'stats-grid' },
       stat('字数', s.chars), stat('段落', s.paragraphs), stat('对话占比', Math.round(s.dialogue_ratio * 100) + '%'),
       stat('平均句长', s.avg_sentence.toFixed(0)), stat('最长段落', s.max_paragraph), stat('长段落', s.long_paragraphs)));

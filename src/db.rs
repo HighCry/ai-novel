@@ -1,4 +1,5 @@
 use crate::models::*;
+use crate::skills::Skill;
 use crate::text::{count_words, number_chapters};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -187,6 +188,18 @@ CREATE TABLE IF NOT EXISTS ai_accepts (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_accepts ON ai_accepts(chapter_id);
+"#;
+
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  markdown TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 "#;
 
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
@@ -425,6 +438,9 @@ impl Db {
         }
         if version < 4 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
+        }
+        if version < 5 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
         }
         Ok(Self { conn: Arc::new(Mutex::new(conn)), lib_rev: Arc::new(AtomicU64::new(1)) })
     }
@@ -1229,6 +1245,43 @@ impl Db {
             [serde_json::to_string(s)?],
         )?;
         Ok(())
+    }
+
+    // ---------- 写作技能（作者导入的；内置技能不进数据库） ----------
+
+    pub fn list_skills(&self) -> Result<Vec<Skill>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id, markdown, source, updated_at FROM skills ORDER BY created_at, id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, md, source, updated) = row?;
+            out.push(Skill::from_markdown(&id, &md, &source, false, updated));
+        }
+        Ok(out)
+    }
+
+    pub fn get_skill(&self, id: &str) -> Result<Option<Skill>> {
+        let row: Option<(String, String, i64)> = self
+            .c()
+            .query_row("SELECT markdown, source, updated_at FROM skills WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        Ok(row.map(|(md, source, updated)| Skill::from_markdown(id, &md, &source, false, updated)))
+    }
+
+    pub fn save_skill(&self, s: &Skill) -> Result<()> {
+        let t = now();
+        self.c().execute(
+            "INSERT INTO skills (id, name, description, source, markdown, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, source = excluded.source,
+             markdown = excluded.markdown, updated_at = excluded.updated_at",
+            params![s.id, s.name, s.description, s.source, s.markdown, t],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_skill(&self, id: &str) -> Result<bool> {
+        Ok(self.c().execute("DELETE FROM skills WHERE id = ?1", [id])? > 0)
     }
 
     // ---------- 统计 ----------

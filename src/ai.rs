@@ -3,10 +3,11 @@
 use crate::api::{bad_request, load_book_data, not_found, upstream, ApiResult, AppError};
 use crate::db::AiLog;
 use crate::library;
-use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmEvent, Message, Usage};
+use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmClient, LlmEvent, Message, Usage, CANCELLED};
 use crate::memory::{compose, match_entries, render, render_entry, BookData, ComposeOpts};
-use crate::models::{Book, Chapter, Entry, Role, Settings};
+use crate::models::{Book, Chapter, Entry, Provider, Role, Settings};
 use crate::prompts::{self, golden_hint, instruction_block, render_id, titled, titled_block, Brief};
+use crate::skills::{self, Skill};
 use crate::state::AppState;
 use crate::stylelib::{guide_block, refs_block, tags_for, Hit, LibQuery};
 use crate::text::{clip, head_chars, tail_chars};
@@ -18,7 +19,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -50,6 +52,8 @@ pub struct AiRequest {
     pub tags: Vec<String>,
     /// 斜杠指令和起名要写的内容
     pub goal: String,
+    /// 技能修订（deslop）用哪个技能，空着用内置的「网文去AI味」
+    pub skill: String,
 }
 
 pub struct Prepared {
@@ -58,16 +62,31 @@ pub struct Prepared {
     pub json: bool,
 }
 
-/// 写正文时附加的文风指南和检索到的范文
+/// 技能修订要用的：技能、要修订的正文、本地检测结果、必须原样保留的设定词
+pub struct Revise {
+    pub skill: Skill,
+    pub text: String,
+    pub report: crate::lint::LintReport,
+    pub keep: Vec<String>,
+}
+
+/// 写正文时附加的写作技能、文风指南和检索到的范文
 #[derive(Default)]
 pub struct StyleCtx {
+    /// 启用技能的「写作规则」
+    pub skills: String,
     pub guide: String,
     pub refs: Vec<Hit>,
+    pub revise: Option<Revise>,
 }
 
 impl StyleCtx {
     fn block(&self) -> String {
-        [guide_block(&self.guide), refs_block(&self.refs)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n")
+        [self.skills.clone(), guide_block(&self.guide), refs_block(&self.refs)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 }
 
@@ -77,7 +96,7 @@ type Vars = HashMap<&'static str, String>;
 pub const JSON_RULE: &str = "\n\n输出格式要求：只输出一个合法的 JSON 对象，不要加任何说明文字；JSON 字符串内部需要引号时用「」或“”，不要用英文双引号。";
 
 /// 会带上文风指南和范文参考的写正文任务
-const STYLED_TASKS: &[&str] = &["continue", "write_chapter", "expand", "rewrite", "polish", "ghost", "insert"];
+const STYLED_TASKS: &[&str] = &["continue", "write_chapter", "expand", "rewrite", "polish", "ghost", "insert", "deslop"];
 
 fn field(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
@@ -190,6 +209,34 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
         Prepared { role, messages: vec![Message::system(system), Message::user(user)], json }
     };
     match task {
+        "deslop" => {
+            let d = need(data)?;
+            let cur = req.chapter_id.and_then(|id| d.chapter(id));
+            let r = style.revise.as_ref().ok_or_else(|| bad_request("没有选择修订用的技能"))?;
+            if r.text.trim().is_empty() {
+                return Err(bad_request("没有可修订的正文"));
+            }
+            let opts = ComposeOpts {
+                current: cur,
+                focus_text: &r.text,
+                instruction: &req.instruction,
+                budget: s.context_budget / 3,
+                include_world: false,
+                include_outline: false,
+            };
+            let mut v = chapter_task_vars(d, cur, render(&compose(d, &opts)), req);
+            v.insert("before_block", titled_block("前文", &tail_chars(&req.before, 500), 500));
+            v.insert("after_block", titled_block("后文", &head_chars(&req.after, 300), 300));
+            v.insert("issues", crate::lint::ai_brief(&r.report));
+            v.insert("keep_block", titled("必须原样保留的设定词（一个字都不要改，所在的信息也不要删）", &r.keep.join("、")));
+            // 模型对百分比不敏感，换算成字数下限更管用
+            let chars = r.report.stats.chars;
+            v.insert("words", chars.to_string());
+            v.insert("min_words", ((chars as f32) * (1.0 - crate::lint::cut_ratio(&r.report.ai_level))).round().to_string());
+            v.insert("selection", r.text.clone());
+            let system = format!("{}\n\n{}", writer_system(&d.book, ov, style), skills::revise_block(&r.skill));
+            Ok(prepared(Role::Writer, system, "task.deslop", &v, false))
+        }
         "continue" | "write_chapter" | "beats" | "expand" | "shorten" | "rewrite" | "polish" | "free" | "ghost" | "insert" => {
             let d = need(data)?;
             let cur = req.chapter_id.and_then(|id| d.chapter(id));
@@ -538,7 +585,7 @@ fn style_query(req: &AiRequest, d: &BookData) -> (String, Vec<String>) {
     let mut tags = req.tags.clone();
     let mut q = String::new();
     match req.task.as_str() {
-        "expand" | "rewrite" | "polish" => q.push_str(&head_chars(&req.selection, 400)),
+        "expand" | "rewrite" | "polish" | "deslop" => q.push_str(&head_chars(&req.selection, 400)),
         "write_chapter" => {
             if let Some(c) = cur {
                 q = format!("{}\n{}", clip(&c.outline, 300), clip(&c.beats, 400));
@@ -605,20 +652,114 @@ async fn gather_style(st: &AppState, req: &AiRequest, data: Option<&BookData>, s
     ctx
 }
 
-async fn prepare_request(st: &AppState, req: &AiRequest) -> Result<(Settings, Prepared, StyleCtx), AppError> {
+/// 技能修订每块的大致字数。整章一次修订时模型会大段压缩、顺手删掉台词和细节，切成小块分别修订忠实得多
+const REVISE_CHUNK: usize = 800;
+/// 分块修订时同时请求的块数上限
+const REVISE_PARALLEL: usize = 4;
+
+/// 正文的段落分隔：有空行就按空行分段
+fn para_sep(text: &str) -> &'static str {
+    if text.contains("\n\n") {
+        "\n\n"
+    } else {
+        "\n"
+    }
+}
+
+/// 按段落把要修订的正文切成每块约 REVISE_CHUNK 字；不到一块半不切
+fn revise_chunks(text: &str) -> Vec<String> {
+    let sep = para_sep(text);
+    let count = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+    if count(text) < REVISE_CHUNK * 3 / 2 {
+        return vec![text.to_string()];
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut n = 0;
+    for p in text.split(sep).filter(|p| !p.trim().is_empty()) {
+        cur.push(p);
+        n += count(p);
+        if n >= REVISE_CHUNK {
+            chunks.push(cur.join(sep));
+            cur.clear();
+            n = 0;
+        }
+    }
+    if !cur.is_empty() {
+        let rest = cur.join(sep);
+        match chunks.last_mut() {
+            // 剩下的太短就并进上一块
+            Some(last) if n < REVISE_CHUNK / 3 => {
+                last.push_str(sep);
+                last.push_str(&rest);
+            }
+            _ => chunks.push(rest),
+        }
+    }
+    chunks
+}
+
+/// 组装提示词。一般只有一份；技能修订的正文较长时按段落分块，每块一份
+async fn prepare_request(st: &AppState, req: &AiRequest) -> Result<(Settings, Vec<Prepared>, StyleCtx), AppError> {
     let settings = st.db.get_settings()?;
     let overrides = st.db.prompt_overrides()?;
     let data = load(st, req)?;
-    let style = gather_style(st, req, data.as_ref(), &settings).await;
-    let prep = build(req, data.as_ref(), &settings, &overrides, &style)?;
-    Ok((settings, prep, style))
+    let mut style = gather_style(st, req, data.as_ref(), &settings).await;
+    if data.is_some() {
+        style.skills = skills::rules_block(&skills::active(&st.db, &settings));
+    }
+    if req.task != "deslop" {
+        let prep = build(req, data.as_ref(), &settings, &overrides, &style)?;
+        return Ok((settings, vec![prep], style));
+    }
+    let d = need(data.as_ref())?;
+    let id = if req.skill.trim().is_empty() { skills::DESLOP_ID } else { req.skill.trim() };
+    let skill = skills::find(&st.db, id)?.ok_or_else(|| not_found("技能"))?;
+    let text = if req.selection.trim().is_empty() {
+        req.chapter_id.and_then(|id| d.chapter(id)).map(|c| c.content.clone()).unwrap_or_default()
+    } else {
+        req.selection.clone()
+    };
+    let revise = |text: &str| Revise {
+        skill: skill.clone(),
+        text: text.to_string(),
+        report: crate::lint::lint(text, &settings.extra_cliches),
+        keep: skills::keep_terms(&d.entries, text),
+    };
+    let chunks = revise_chunks(&text);
+    let sep = para_sep(&text);
+    let mut parts = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        // 每块的前后文用相邻的块
+        let sub = AiRequest {
+            before: if i == 0 { req.before.clone() } else { chunks[..i].join(sep) },
+            after: if i + 1 == chunks.len() { req.after.clone() } else { chunks[i + 1..].join(sep) },
+            ..req.clone()
+        };
+        style.revise = Some(revise(chunk));
+        parts.push(build(&sub, data.as_ref(), &settings, &overrides, &style)?);
+    }
+    // meta 里给前端核对用的是整段的检测结果和保护词
+    style.revise = Some(revise(&text));
+    Ok((settings, parts, style))
 }
 
 fn style_meta(style: &StyleCtx) -> Value {
-    json!({
+    let mut meta = json!({
         "guide": !style.guide.trim().is_empty(),
         "refs": style.refs.iter().map(|h| json!({ "item_id": h.item_id, "title": h.title, "tags": h.tags })).collect::<Vec<_>>(),
-    })
+    });
+    // 前端拿这些核对修改稿：删减是否超过上限、有没有设定词被改掉
+    if let Some(r) = &style.revise {
+        meta["revise"] = json!({
+            "skill": r.skill.name,
+            "keep": r.keep,
+            "max_cut": crate::lint::max_cut(&r.report.ai_level),
+            "ai_level": r.report.ai_level,
+            "ai_density": r.report.ai_density,
+        });
+    }
+    meta
 }
 
 fn log_usage(st: &crate::db::Db, req: &AiRequest, model: &str, chars_in: i64, output: &str, usage: Option<Usage>) {
@@ -645,8 +786,10 @@ fn log_usage(st: &crate::db::Db, req: &AiRequest, model: &str, chars_in: i64, ou
 
 /// 只组装提示词、不调用模型，用于「查看提示词」。
 pub async fn preview(State(st): State<AppState>, Json(req): Json<AiRequest>) -> ApiResult<Value> {
-    let (settings, prep, style) = prepare_request(&st, &req).await?;
-    let chars = input_chars(&prep.messages);
+    let (settings, parts, style) = prepare_request(&st, &req).await?;
+    let chars: i64 = parts.iter().map(|p| input_chars(&p.messages)).sum();
+    // 分块修订时只展示第一块的提示词，字数按所有块合计
+    let prep = &parts[0];
     let model = settings.resolve(prep.role).map(|(cfg, p)| format!("{} · {}", p.name, cfg.model)).unwrap_or_else(|e| e.to_string());
     Ok(Json(json!({
         "messages": prep.messages,
@@ -655,31 +798,142 @@ pub async fn preview(State(st): State<AppState>, Json(req): Json<AiRequest>) -> 
         "model": model,
         "role": if prep.role == Role::Writer { "writer" } else { "analyst" },
         "style": style_meta(&style),
+        "parts": parts.len(),
     })))
+}
+
+/// 拼接分块修订的输出：去掉每块开头的空行，块末尾的空白先压着，块与块之间只留一个段落分隔符
+struct Joiner {
+    sep: &'static str,
+    out: String,
+    /// 当前块已经输出过内容
+    started: bool,
+    /// 暂不输出的空白：块开头的空行，或者可能是块结尾的换行
+    held: String,
+}
+
+impl Joiner {
+    fn new(sep: &'static str) -> Self {
+        Self { sep, out: String::new(), started: false, held: String::new() }
+    }
+
+    fn next_chunk(&mut self) {
+        self.started = false;
+        self.held.clear();
+    }
+
+    /// 收进一段增量，返回现在可以发给前端的部分
+    fn push(&mut self, t: &str) -> String {
+        self.held.push_str(t);
+        let mut emit = String::new();
+        if !self.started {
+            let Some(i) = self.held.find(|c: char| !c.is_whitespace()) else { return emit };
+            // 丢掉开头的空行，保留首段的缩进
+            let start = self.held[..i].rfind('\n').map_or(0, |j| j + 1);
+            self.held.drain(..start);
+            if !self.out.is_empty() {
+                emit.push_str(self.sep);
+            }
+            self.started = true;
+        }
+        let body = self.held.trim_end().len();
+        emit.push_str(&self.held[..body]);
+        self.held.drain(..body);
+        self.out.push_str(&emit);
+        emit
+    }
+}
+
+/// 分块修订：几块同时请求，按顺序转发。第一块边生成边发，后面的先攒着，轮到时一次发出再接着实时转发
+async fn relay_parts(
+    llm: &LlmClient,
+    provider: &Provider,
+    chats: Vec<ChatRequest>,
+    sep: &'static str,
+    tx: &mpsc::Sender<LlmEvent>,
+) -> anyhow::Result<(String, Option<Usage>)> {
+    let gate = Arc::new(Semaphore::new(REVISE_PARALLEL));
+    let lanes: Vec<_> = chats
+        .into_iter()
+        .map(|chat| {
+            // 容量要攒得下一整块的输出，没轮到的块才不会卡住
+            let (ptx, prx) = mpsc::channel::<LlmEvent>(4096);
+            let (llm, provider, gate) = (llm.clone(), provider.clone(), gate.clone());
+            let task = tokio::spawn(async move {
+                let _permit = gate.acquire_owned().await?;
+                // 前面的块出错或用户停止后接收端已关闭，排队的块就不再请求
+                if ptx.is_closed() {
+                    anyhow::bail!(CANCELLED);
+                }
+                llm.chat_stream(&provider, &chat, &ptx).await
+            });
+            (prx, task)
+        })
+        .collect();
+    let mut join = Joiner::new(sep);
+    let mut usage = Some(Usage::default());
+    for (i, (mut prx, task)) in lanes.into_iter().enumerate() {
+        join.next_chunk();
+        while let Some(ev) = prx.recv().await {
+            let ev = match ev {
+                LlmEvent::Delta(t) => {
+                    let emit = join.push(&t);
+                    if emit.is_empty() {
+                        continue;
+                    }
+                    LlmEvent::Delta(emit)
+                }
+                other => other,
+            };
+            tx.send(ev).await.map_err(|_| anyhow::anyhow!(CANCELLED))?;
+        }
+        let (_, u) = task.await??;
+        if !join.started {
+            anyhow::bail!("第 {} 块的修订结果是空的", i + 1);
+        }
+        // 有一块没返回用量就整体按字数估算
+        usage = usage.zip(u).map(|(a, b)| Usage {
+            prompt_tokens: a.prompt_tokens + b.prompt_tokens,
+            completion_tokens: a.completion_tokens + b.completion_tokens,
+        });
+    }
+    Ok((join.out, usage))
 }
 
 pub async fn stream(
     State(st): State<AppState>,
     Json(req): Json<AiRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let (settings, prep, style) = prepare_request(&st, &req).await?;
+    let (settings, parts, style) = prepare_request(&st, &req).await?;
     let meta = Event::default().event("meta").data(style_meta(&style).to_string());
-    let (cfg, provider) = settings.resolve(prep.role).map_err(|e| bad_request(e.to_string()))?;
-    let chat = ChatRequest {
-        model: cfg.model,
-        messages: prep.messages,
-        temperature: (cfg.temperature + req.variant as f32 * 0.08).min(1.5),
-        max_tokens: cfg.max_tokens,
-        json_mode: false,
-        stream_usage: settings.stream_usage,
-    };
-    let chars_in = input_chars(&chat.messages);
+    let sep = style.revise.as_ref().map_or("\n", |r| para_sep(&r.text));
+    let (cfg, provider) = settings.resolve(parts[0].role).map_err(|e| bad_request(e.to_string()))?;
+    // 修订要克制：温度高了模型会顺手改掉没问题的句子
+    let base = if req.task == "deslop" { cfg.temperature.min(0.7) } else { cfg.temperature };
+    let chats: Vec<ChatRequest> = parts
+        .into_iter()
+        .map(|p| ChatRequest {
+            model: cfg.model.clone(),
+            messages: p.messages,
+            temperature: (base + req.variant as f32 * 0.08).min(1.5),
+            max_tokens: cfg.max_tokens,
+            json_mode: false,
+            stream_usage: settings.stream_usage,
+        })
+        .collect();
+    let chars_in: i64 = chats.iter().map(|c| input_chars(&c.messages)).sum();
+    let model = cfg.model;
     let (tx, rx) = mpsc::channel::<LlmEvent>(256);
     let (llm, db) = (st.llm.clone(), st.db.clone());
     tokio::spawn(async move {
-        match llm.chat_stream(&provider, &chat, &tx).await {
+        let result = if chats.len() == 1 {
+            llm.chat_stream(&provider, &chats[0], &tx).await
+        } else {
+            relay_parts(&llm, &provider, chats, sep, &tx).await
+        };
+        match result {
             Ok((text, usage)) => {
-                log_usage(&db, &req, &chat.model, chars_in, &text, usage);
+                log_usage(&db, &req, &model, chars_in, &text, usage);
                 let _ = tx.send(LlmEvent::Done(text)).await;
             }
             Err(e) => {
@@ -745,7 +999,8 @@ pub async fn complete_text(st: &AppState, settings: &Settings, prep: Prepared, r
 }
 
 pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -> ApiResult<Value> {
-    let (settings, prep, _) = prepare_request(&st, &req).await?;
+    let (settings, parts, _) = prepare_request(&st, &req).await?;
+    let Ok([prep]) = <[Prepared; 1]>::try_from(parts) else { return Err(bad_request("分块修订只能用流式接口")) };
     if prep.json {
         let value = complete_json(&st, &settings, prep, &req).await?;
         if req.task == "tension" {
@@ -776,12 +1031,43 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
 
 #[cfg(test)]
 mod tests {
-    use super::clean_plain;
+    use super::{clean_plain, revise_chunks, Joiner};
 
     #[test]
     fn strips_titles_and_markdown() {
         assert_eq!(clean_plain("**剧情摘要：**\n\n林凡进了城，**遇到**苏雨。"), "林凡进了城，遇到苏雨。");
         assert_eq!(clean_plain("# 卷摘要\n---\n剧情摘要：第一卷讲了……"), "第一卷讲了……");
         assert_eq!(clean_plain("正常文本"), "正常文本");
+    }
+
+    #[test]
+    fn splits_revision_by_paragraph() {
+        let para = format!("　　{}", "字".repeat(150));
+        let book = |n: usize, sep: &str| vec![para.as_str(); n].join(sep);
+        assert_eq!(revise_chunks(&book(7, "\n\n")).len(), 1, "不到一块半不切");
+        // 每 6 段（900 字）一块，剩下 2 段 300 字单独成块
+        let text = book(20, "\n\n");
+        let chunks = revise_chunks(&text);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks.join("\n\n"), text, "拼回去和原文一样");
+        // 剩下 1 段太短，并进上一块
+        let chunks = revise_chunks(&book(19, "\n"));
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[2].matches('\n').count(), 6);
+    }
+
+    #[test]
+    fn joins_revised_chunks() {
+        let mut j = Joiner::new("\n\n");
+        let mut sent = String::new();
+        for t in ["\n\n　　第一段", "。\n\n　　第二", "段。\n", "\n"] {
+            sent += &j.push(t);
+        }
+        j.next_chunk();
+        for t in ["\n", "　　", "第三段。", "\n\n"] {
+            sent += &j.push(t);
+        }
+        assert_eq!(j.out, "　　第一段。\n\n　　第二段。\n\n　　第三段。");
+        assert_eq!(sent, j.out, "边生成边发的内容和最终结果一致");
     }
 }

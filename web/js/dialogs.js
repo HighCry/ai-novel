@@ -766,6 +766,7 @@ export async function openPreview(body) {
     wide: 'xl',
     body: h('div', { class: 'context-view' },
       h('p', { class: 'hint' }, `模型：${r.model}。内容可以在「设置 → 编辑提示词模板」里调整。`),
+      r.parts > 1 ? h('p', { class: 'hint' }, `正文较长，会按段落分 ${r.parts} 块分别修订，下面是第 1 块的提示词；字数按所有块合计。`) : null,
       r.messages.map((m) => h('details', { open: true }, h('summary', null, `${roleName[m.role] || m.role}（${m.content.length} 字）`), h('pre', null, m.content)))),
     actions: [
       { label: '复制全部', onClick: () => copyText(r.messages.map((m) => `【${roleName[m.role] || m.role}】\n${m.content}`).join('\n\n')) },
@@ -1041,6 +1042,166 @@ export function openBatchDraft() {
       log),
     actions: [{ label: '关闭', onClick: (c) => { cancelled = true; c(); } }],
   });
+}
+
+// ---------------- 写作技能 ----------------
+
+const SKILL_PICKS = [
+  ['story-deslop：oh-story-claudecode 的网文去 AI 味全流程（MIT）', 'https://github.com/worldwonderer/oh-story-claudecode/tree/HEAD/skills/story-deslop'],
+  ['humanizer：blader 的英文去 AI 腔技能，GitHub 3.8 万星（MIT）', 'https://github.com/blader/humanizer'],
+];
+
+export function openSkills() {
+  const list = h('div', { class: 'skill-list' }, h('div', { class: 'boot' }, '加载中……'));
+  const draw = async () => {
+    let skills;
+    try {
+      skills = await api.get('/skills');
+    } catch (e) {
+      list.replaceChildren(h('div', { class: 'empty' }, '加载失败：' + e.message));
+      return;
+    }
+    list.replaceChildren(...skills.map((s) => skillCard(s, draw)));
+  };
+  modal({
+    title: '写作技能',
+    wide: true,
+    body: h('div', null,
+      h('p', { class: 'hint' }, '技能是一份 Markdown 说明书，格式和 Claude 的 SKILL.md 一样。启用后，它的「写作规则」一节会在写正文时自动遵守；在「AI 写作 → 去 AI 味」里还能用它修订整章或选中的段落，改动逐句可选。'),
+      list,
+      skillImport(draw)),
+  });
+  draw();
+}
+
+function syncActive(active) {
+  if (store.settings && active) store.settings.skills = active;
+  emit('skills-changed');
+}
+
+function skillCard(s, refresh) {
+  const toggle = h('input', {
+    type: 'checkbox',
+    checked: s.active,
+    onchange: async () => {
+      try {
+        const r = await api.put(`/skills/${s.id}/active`, { active: toggle.checked });
+        syncActive(r.active);
+        card.classList.toggle('on', toggle.checked);
+        toast(toggle.checked ? `已启用「${s.name}」` : `已停用「${s.name}」`);
+      } catch (e) {
+        toggle.checked = !toggle.checked;
+        toast(e.message, 'error');
+      }
+    },
+  });
+  const remove = async () => {
+    if (!(await confirmBox(`删除技能「${s.name}」？`, { okText: '删除', danger: true }))) return;
+    try {
+      const r = await api.del(`/skills/${s.id}`);
+      syncActive(r.active);
+      refresh();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  const card = h('div', { class: 'skill-card' + (s.active ? ' on' : '') },
+    h('div', { class: 'skill-head' },
+      h('b', null, s.name),
+      h('span', { class: 'tag' + (s.builtin ? ' accent' : '') }, s.builtin ? '内置' : '我导入的'),
+      h('span', { class: 'spacer' }),
+      h('label', { class: 'check', title: '启用后，写正文时遵守它的写作规则' }, toggle, '启用')),
+    h('div', { class: 'small' }, s.description),
+    h('div', { class: 'muted small' }, `来源：${s.source || '未注明'} · ${s.has_rules ? '含写作规则' : '没有「写作规则」一节，只用于修订'} · ${s.chars} 字`),
+    h('div', { class: 'row tight' },
+      h('button', { class: 'mini', onclick: () => viewSkill(s, refresh) }, s.builtin ? '查看 / 复制' : '查看 / 编辑'),
+      s.builtin ? null : h('button', { class: 'mini danger', onclick: remove }, '删除')));
+  return card;
+}
+
+async function viewSkill(s, refresh) {
+  let full;
+  try {
+    full = await api.get(`/skills/${s.id}`);
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  const editor = h('textarea', { class: 'skill-md', rows: 18, value: full.markdown, readOnly: s.builtin, spellcheck: false });
+  const save = s.builtin
+    ? {
+      label: '复制为我的技能',
+      class: 'primary',
+      onClick: async (close) => {
+        try {
+          await api.post('/skills', { markdown: full.markdown, source: `复制自「${s.name}」` });
+          toast('已复制，在列表里可以编辑');
+          emit('skills-changed');
+          refresh();
+          close();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      },
+    }
+    : {
+      label: '保存',
+      class: 'primary',
+      onClick: async (close) => {
+        try {
+          await api.put(`/skills/${s.id}`, { markdown: editor.value });
+          toast('已保存');
+          emit('skills-changed');
+          refresh();
+          close();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      },
+    };
+  modal({
+    title: s.name,
+    wide: true,
+    body: h('div', null,
+      full.rules
+        ? h('details', { class: 'skill-rules' }, h('summary', null, '写正文时注入的「写作规则」'), h('pre', null, full.rules))
+        : h('p', { class: 'hint' }, '这个技能没有「## 写作规则」一节，写正文时不会注入，只在去 AI 味修订时使用。'),
+      editor),
+    actions: [{ label: '关闭', onClick: (c) => c() }, save],
+  });
+}
+
+function skillImport(done) {
+  const text = h('textarea', { rows: 5, spellcheck: false, placeholder: '把 SKILL.md 的内容粘贴到这里（开头可以带 --- name / description --- 头信息）' });
+  const url = h('input', { placeholder: 'GitHub 上技能的文件、目录或仓库地址，如 https://github.com/blader/humanizer' });
+  const submit = (body, btn) => busy(btn, async () => {
+    const r = await api.post('/skills', body);
+    toast(`已导入「${r.card.name}」，勾选「启用」后写正文时生效`, 'info', 4000);
+    text.value = '';
+    url.value = '';
+    emit('skills-changed');
+    done();
+  }, '导入中…');
+  const pasteBtn = h('button', { class: 'btn', onclick: () => (text.value.trim() ? submit({ markdown: text.value }, pasteBtn) : toast('先粘贴技能内容', 'warn')) }, '导入粘贴的内容');
+  const fileBtn = h('button', {
+    class: 'btn',
+    onclick: async () => {
+      const f = await pickFile('.md,.markdown,.txt');
+      if (f) submit({ markdown: await f.text(), source: f.name }, fileBtn);
+    },
+  }, '选择 .md 文件');
+  const urlBtn = h('button', { class: 'btn', onclick: () => (url.value.trim() ? submit({ url: url.value.trim() }, urlBtn) : toast('先填网址', 'warn')) }, '从网址导入');
+  const picks = SKILL_PICKS.map(([label, link]) => {
+    const b = h('button', { class: 'mini', onclick: () => submit({ url: link }, b) }, '导入');
+    return h('div', { class: 'pick-row' }, h('span', { class: 'small grow' }, label), b);
+  });
+  return h('details', { class: 'skill-import' },
+    h('summary', null, '导入技能'),
+    text,
+    h('div', { class: 'row' }, pasteBtn, fileBtn),
+    h('div', { class: 'row' }, url, urlBtn),
+    h('div', { class: 'small muted' }, '值得一试的社区技能（需要能访问 GitHub）：'),
+    picks);
 }
 
 // ---------------- 命令面板（Ctrl+K） ----------------

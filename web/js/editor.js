@@ -2,7 +2,7 @@ import { api, streamInto } from './api.js';
 import { store, on, emit, scope, chapterLabel, reload } from './store.js';
 import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, countWords, themeButton, moreButton, icon, pushLayer } from './ui.js';
 import { renderPanels } from './panels.js';
-import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette } from './dialogs.js';
+import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette, openSkills } from './dialogs.js';
 import { attachAssist, pref } from './assist.js';
 import { libraryButton } from './stylelib.js';
 import { openReader } from './reader.js';
@@ -68,6 +68,7 @@ function topBar(layout) {
     h('button', { class: 'ghost', onclick: () => openExport() }, '导出'),
     h('button', { class: 'ghost', onclick: () => openStats() }, '统计'),
     h('button', { class: 'ghost', title: '爽点、钩子、冲突、润色等写作手册', onclick: () => openHandbook() }, '手册'),
+    h('button', { class: 'ghost', title: '去 AI 味等写作技能：写正文时自动遵守，也能用来修订', onclick: () => openSkills() }, '技能'),
     libraryButton(),
     h('button', {
       class: 'ghost desk-only',

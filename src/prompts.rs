@@ -154,6 +154,25 @@ const POLISH: &str = "{{context}}
 请润色【需要处理的段落】：修正病句、错别字和不通顺的地方，删掉套话和 AI 腔（解释腔、上帝视角、弱化副词堆砌、三连排比、段尾感悟），让节奏更紧凑；只做必要的修改，不改情节，不改人物的说话风格。{{instruction_block}}
 只输出处理后的段落，不要输出前文和后文，不要解释。";
 
+const DESLOP: &str = "{{context}}
+
+{{before_block}}
+
+【需要修订的正文】
+{{selection}}
+
+{{after_block}}
+
+【本地检测结果（供参考：按语境判断，有功能的写法可以保留）】
+{{issues}}
+
+{{keep_block}}
+
+请按系统提示里【本次修订使用的技能】修订【需要修订的正文】，优先处理上面检测到的问题。{{instruction_block}}
+要求：只改“怎么说”，不改“说什么”；改最少的字，没有问题的句子原样保留。原文里发生的每一件事、说的每一句台词都要留下：台词可以改得更口语，不能删；人名、地名、物品和功法的全名、境界等级、数量、地点细节（比如在谁的哪个房间）、事件顺序都属于设定，一个字都不改；不要整段删除。
+原文约 {{words}} 字，修订稿控制在 {{min_words}}～{{words}} 字，不要比原文长：要删的只是套话、重复和多余的修饰，不是情节、台词和设定信息；比喻和强调词改成直写，不要连同所在的句子一起删；有问题的句子可以换成一个具体的动作或后果，但不要另外补写原文没有的情节、细节和台词，也不要为了把句子写长往里加东西。不要把句子都压成短句，也不要用同义词轮换来应付。
+只输出修订后的完整正文，不要标题、说明或修改清单。";
+
 const FREE: &str = "{{context}}
 
 {{chapter_block}}
@@ -483,6 +502,24 @@ pub const TEMPLATES: &[Template] = &[
         description: "润色选中的段落",
         vars: &[V_CONTEXT, ("before_block", "选区前文"), ("selection", "选中的段落"), ("after_block", "选区后文"), V_INSTRUCTION],
         text: POLISH,
+    },
+    Template {
+        id: "task.deslop",
+        name: "技能修订（去AI味）",
+        group: "写作",
+        description: "按选定的写作技能和本地检测结果修订整章或选中的段落；技能说明会附在系统提示后面",
+        vars: &[
+            V_CONTEXT,
+            ("before_block", "选区前文（修订整章时为空）"),
+            ("selection", "要修订的正文"),
+            ("after_block", "选区后文（修订整章时为空）"),
+            ("issues", "本地检测到的 AI 味问题和等级"),
+            ("keep_block", "正文里出现的设定名、境界、关键数量等必须原样保留的词"),
+            ("words", "要修订的正文字数"),
+            ("min_words", "修订稿的字数下限（按 AI 味等级允许删减 15%/25%/35%）"),
+            V_INSTRUCTION,
+        ],
+        text: DESLOP,
     },
     Template {
         id: "task.free",

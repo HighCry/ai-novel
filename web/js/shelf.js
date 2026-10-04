@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { emit, modelReady, on, scope } from './store.js';
 import { h, toast, confirmBox, fmtWords, fmtTime, themeButton, moreButton } from './ui.js';
 import { openWizard } from './wizard.js';
-import { openSettings, openImport, openHandbook } from './dialogs.js';
+import { openSettings, openImport, openHandbook, openSkills } from './dialogs.js';
 import { libraryButton } from './stylelib.js';
 
 const PLATFORM = { fanqie: '番茄', qidian: '起点' };
@@ -19,6 +19,7 @@ export async function renderShelf(root) {
       h('button', { class: 'btn primary', onclick: () => openSettings() }, '去设置'));
   const actions = h('div', { class: 'top-actions' },
     h('button', { class: 'ghost', title: '爽点、钩子、冲突、润色等写作手册', onclick: () => openHandbook() }, '写作手册'),
+    h('button', { class: 'ghost', title: '去 AI 味等写作技能：写正文时自动遵守，也能用来修订', onclick: () => openSkills() }, '写作技能'),
     libraryButton(),
     themeButton(),
     h('button', { class: 'ghost', onclick: () => openSettings() }, '设置'));

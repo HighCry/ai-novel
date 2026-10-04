@@ -378,6 +378,8 @@ pub struct Settings {
     pub use_style_guide: bool,
     /// 向量检索（可选）：没配置时文风库只用关键词、标签和题材检索
     pub embedding: EmbedRole,
+    /// 启用的写作技能 id，按顺序注入写作规则（内置的「网文去AI味」默认启用）
+    pub skills: Vec<String>,
 }
 
 impl Default for Settings {
@@ -395,6 +397,7 @@ impl Default for Settings {
             library_refs: 2,
             use_style_guide: true,
             embedding: EmbedRole::default(),
+            skills: vec![crate::skills::DESLOP_ID.to_string()],
         }
     }
 }
