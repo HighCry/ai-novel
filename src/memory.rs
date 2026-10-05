@@ -158,6 +158,18 @@ impl BookData {
         self.entries.iter().filter(|e| e.gate().open_at(at)).collect()
     }
 
+    /// 伏笔详情在写 current 时能给多少：定稿会在末尾追加【推进】【回收】记录，但不记是哪一章写的；
+    /// 这条伏笔在本章之后还推进或回收过时，分不清哪些记录在后面，只给埋下时的原文。
+    pub fn thread_detail_at(&self, t: &Thread, current: Option<&Chapter>) -> String {
+        let cur = current.and_then(|c| self.position(c.id));
+        let after = |id: Option<i64>| matches!((id.and_then(|id| self.position(id)), cur), (Some(p), Some(c)) if p > c);
+        if !after(t.last_chapter_id) && !after(t.resolved_chapter_id) {
+            return t.detail.clone();
+        }
+        let cut = ["【推进】", "【回收】"].iter().filter_map(|m| t.detail.find(m)).min().unwrap_or(t.detail.len());
+        t.detail[..cut].trim().to_string()
+    }
+
     /// 写 current 这一章时还没回收的伏笔：本章及之前埋下、到本章时还没回收的。
     pub fn open_threads(&self, current: Option<&Chapter>) -> Vec<&Thread> {
         let cur = current.and_then(|c| self.position(c.id));
@@ -429,8 +441,9 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
         .map(|t| {
             let planted = t.planted_chapter_id.and_then(|id| data.chapter(id));
             let mut line = format!("· {}", t.title.trim());
-            if !t.detail.trim().is_empty() {
-                line += &format!("：{}", clip(&t.detail, 120));
+            let detail = data.thread_detail_at(t, o.current);
+            if !detail.is_empty() {
+                line += &format!("：{}", clip(&detail, 120));
             }
             if let Some(p) = planted {
                 line += &format!("（埋于{}", data.label(p));
@@ -539,15 +552,24 @@ mod tests {
         data.entries.push(Entry { id: 5, name: "玉佩器灵".into(), kind: "character".into(), visibility: "对AI隐藏".into(), always_include: true, ..Default::default() });
         data.relations = vec![Relation { id: 1, a_id: 1, b_id: 2, kind: "道侣".into(), status: "active".into(), since_chapter_id: Some(3), ..Default::default() }];
         data.threads.push(Thread { id: 2, title: "拍卖会上的神秘人".into(), status: "open".into(), planted_chapter_id: Some(3), ..Default::default() });
-        data.threads.push(Thread { id: 3, title: "城门守卫的暗号".into(), status: "resolved".into(), planted_chapter_id: Some(1), resolved_chapter_id: Some(3), ..Default::default() });
+        data.threads.push(Thread {
+            id: 3,
+            title: "城门守卫的暗号".into(),
+            detail: "守卫换岗时对暗号\n【推进】苏雨认出暗号出自魔教".into(),
+            status: "resolved".into(),
+            planted_chapter_id: Some(1),
+            resolved_chapter_id: Some(3),
+            last_chapter_id: Some(3),
+            ..Default::default()
+        });
 
         let ch2 = Chapter { outline: "林凡在青云城遇见苏雨".into(), ..data.chapter(2).cloned().unwrap() };
         let opts = |cur| ComposeOpts { current: cur, focus_text: "", instruction: "", budget: 12000, include_world: true, include_outline: true };
         let text = render(&compose(&data, &opts(Some(&ch2))));
-        for want in ["城里很热闹", "【总纲】\n### 第一卷\n进城", "进城拍卖", "青云城的医女", "城门守卫的暗号", "黑色玉佩的来历"] {
+        for want in ["城里很热闹", "【总纲】\n### 第一卷\n进城", "进城拍卖", "青云城的医女", "城门守卫的暗号：守卫换岗时对暗号", "黑色玉佩的来历"] {
             assert!(text.contains(want), "缺少「{want}」：\n{text}");
         }
-        for leak in ["伪神", "九霄天轨", "转世仙帝", "最终成神", "飞升灵界", "登顶青云城", "魔教圣女", "魔尊", "玉佩器灵", "道侣", "神秘人", "〔"] {
+        for leak in ["伪神", "九霄天轨", "转世仙帝", "最终成神", "飞升灵界", "登顶青云城", "魔教圣女", "魔尊", "玉佩器灵", "道侣", "神秘人", "〔", "出自魔教"] {
             assert!(!text.contains(leak), "第2章不该看到「{leak}」：\n{text}");
         }
 

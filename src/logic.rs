@@ -138,7 +138,7 @@ fn new_terms(d: &BookData, out: &mut Vec<Finding>) {
             }
         }
         for t in bracket_terms(&c.content) {
-            if !known.contains(t.trim_matches(['《', '》'])) && seen_terms.insert(t.clone()) {
+            if !known.contains(&t) && !known.contains(t.trim_matches(['《', '》'])) && seen_terms.insert(t.clone()) {
                 fresh.push(t);
             }
         }
@@ -476,7 +476,10 @@ mod tests {
             Entry { id: 6, kind: "item".into(), name: "装着三十枚中品灵石的锦囊".into(), ..Default::default() },
         ];
         let first = "陈渊在黑灵矿区醒来，王奎提刀走近。天轨护道盟的税吏还在路上。\n【诸天禁物：因果置换草偶（残）】\n【位阶：界外遗物】\n装着三十枚中品灵石的锦囊掉在地上。";
-        let d = book(vec![ch(1, first), ch(2, "陈渊回到黑灵矿区，翻开《天元度支簿》。")], entries, vec![]);
+        let mut entries = entries;
+        entries.push(Entry { id: 7, kind: "item".into(), name: "《天轨律法》".into(), ..Default::default() });
+        let second = "陈渊回到黑灵矿区，翻开《天元度支簿》，又想起《天轨律法》第二卷。";
+        let d = book(vec![ch(1, first), ch(2, second)], entries, vec![]);
         let found = check(&d);
         let dense: Vec<&Finding> = found.iter().filter(|f| f.kind == "新名词过多").collect();
         assert_eq!(dense.len(), 1, "{found:?}");
