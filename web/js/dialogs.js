@@ -6,6 +6,7 @@ import { openLibrary, openSaveToLibrary } from './stylelib.js';
 import { openReveals, progressionEditor, revealReview } from './reveals.js';
 import { openTimeline } from './timeline.js';
 import { openTeardown } from './teardown.js';
+import { openTrends } from './trends.js';
 
 let genreProfiles = null;
 export async function loadGenres() {
@@ -60,7 +61,7 @@ const TASK_NAMES = {
   chat: '角色对话', world: '世界观', outline: '总纲', synopsis: '简介', volume_outline: '卷纲', ideas: '开书方案', characters: '人物设计',
   chapter_outlines: '章纲规划', summarize: '摘要', extract: '提取设定', check: '一致性检查', review: '审稿', volume_summary: '卷摘要',
   reveal_plan: '揭示计划', tension: '张力分析', first_read: '冷读者反馈', revision_plan: '修订计划', style_profile: '文风提取',
-  library_analyze: '范文分析', style_distill: '提炼文风指南',
+  library_analyze: '范文分析', style_distill: '提炼文风指南', teardown: '拆书', memes: '挑热梗', preference: '读者偏好预测',
 };
 
 const select = (options, value, onchange) => h('select', { onchange: (e) => onchange(e.target.value) },
@@ -1545,6 +1546,9 @@ export function openPalette() {
     ['全书查找替换（Ctrl+H）', () => openReplace({ find: store.editor?.selection().text.trim() || '' })],
     ['时间线和时限', () => openTimeline()],
     ['拆书对标', () => openTeardown()],
+    ['热梗（今日热搜）', () => openTrends('memes')],
+    ['起点和番茄榜单', () => openTrends('rank')],
+    ['读者偏好预测', () => openTrends('preference')],
     ['统计', () => openStats()],
     ['写作手册', () => openHandbook()],
     ['提示词模板', () => openPrompts()],

@@ -17,7 +17,7 @@ pub const RED_LINE: f64 = 0.10;
 
 /// 平台声明里常见的用途：名称、声明里怎么描述、包含哪些任务
 const CATEGORIES: &[(&str, &str, &[&str])] = &[
-    ("灵感与设定", "讨论创意、世界观、人物和起名", &["ideas", "world", "characters", "names", "chat"]),
+    ("灵感与设定", "讨论创意、世界观、人物和起名", &["ideas", "world", "characters", "names", "chat", "memes"]),
     ("大纲与规划", "辅助整理总纲、卷纲、章纲和场景节拍", &["outline", "volume_outline", "chapter_outlines", "beats", "reveal_plan"]),
     ("简介文案", "辅助撰写作品简介", &["synopsis"]),
     ("讨论与资料查询", "讨论剧情、推演人物反应、查询资料", &["free", "simulate"]),
@@ -26,7 +26,10 @@ const CATEGORIES: &[(&str, &str, &[&str])] = &[
     (
         "分析与检查",
         "生成章节摘要、核对设定前后是否一致、分析节奏，不产生正文",
-        &["summarize", "extract", "check", "review", "tension", "volume_summary", "revision_plan", "first_read", "style_profile", "library_analyze", "style_distill"],
+        &[
+            "summarize", "extract", "check", "review", "tension", "volume_summary", "revision_plan", "first_read", "style_profile", "library_analyze", "style_distill",
+            "teardown", "preference",
+        ],
     ),
 ];
 const OTHER: (&str, &str) = ("其他", "其他辅助");

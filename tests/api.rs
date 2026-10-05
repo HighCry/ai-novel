@@ -38,6 +38,12 @@ const UNIVERSAL_JSON: &str = r#"{
  "names":[{"name":"沈砚","note":"砚台的砚，沉稳"},{"name":"顾长夜","note":"有江湖气"}]
 }"#;
 const GUIDE: &str = "叙事：贴着主角写。\n节奏：打斗用短句。\n禁忌：不写段尾感悟。";
+const TRENDS_JSON: &str = r#"{
+ "memes":[{"word":"情绪价值","from":"微博｜情绪价值","meaning":"让人情绪舒服","scene":"师兄安慰主角","example":"师兄这一句，情绪价值给足了。","risk":"梗会过时"}],
+ "preferences":[{"point":"系统流开局","evidence":"月票榜前三有两本系统流"}],
+ "score":"130","summary":"题材对路","strengths":["开局有系统"],"risks":["简介太平"],
+ "suggestions":[{"target":"简介","advice":"前两句亮出系统"}]
+}"#;
 
 type Seen = Arc<Mutex<Vec<Value>>>;
 
@@ -60,6 +66,8 @@ async fn mock_chat(State(seen): State<Seen>, headers: HeaderMap, Json(body): Jso
     let prompt = body["messages"].to_string();
     let content = if prompt.contains("整理他自己的《文风指南》") {
         GUIDE.to_string()
+    } else if prompt.contains("网络流行语和梗") || prompt.contains("推断读者现在偏好") {
+        TRENDS_JSON.to_string()
     } else if prompt.contains("只输出 JSON") {
         UNIVERSAL_JSON.to_string()
     } else if prompt.contains("剧情摘要") {
@@ -1008,6 +1016,53 @@ async fn reveal_plan_flow() {
     let replaced = c.post(&format!("/api/books/{bid}/reveals/plan"), json!({ "replace": true, "secrets": [{ "title": "唯一的秘密", "reveal_at": 9 }] })).await;
     assert_eq!(replaced, json!({ "created": 1, "updated": 0, "events": 0 }));
     assert_eq!(c.get(&format!("/api/books/{bid}/reveals")).await["reveals"].as_array().unwrap().len(), 1, "整份替换会删掉原来的秘密和进度");
+}
+
+/// 热梗、榜单、读者偏好：预先写好缓存，不碰外网
+#[tokio::test]
+async fn trends_from_cache() {
+    let seen: Seen = Arc::default();
+    let mock = Router::new().route("/v1/models", get(mock_models)).route("/v1/chat/completions", post(mock_chat)).with_state(seen.clone());
+    let mock_addr = spawn(mock).await;
+    let db = Db::open_in_memory().unwrap();
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let hot = json!([{ "source": "微博", "word": "情绪价值", "heat": 900, "tag": "热" }, { "source": "抖音", "word": "班味", "heat": 5, "tag": "" }]);
+    db.set_kv("trend:hot", &json!({ "at": at, "data": hot }).to_string()).unwrap();
+    let rank = |title: &str, cat: &str| json!({ "rank": 1, "title": title, "author": "某人", "category": cat, "words": "100万字", "metric": "1万月票", "status": "", "desc": "少年得到系统" });
+    for kind in ["yuepiao", "readindex", "newauthor"] {
+        let books = json!([rank("开局签到系统", "玄幻·东方玄幻"), rank("我的系统能开局", "玄幻·东方玄幻"), rank("仙途", "仙侠·古典仙侠")]);
+        db.set_kv(&format!("trend:qidian:{kind}"), &json!({ "at": at, "data": books }).to_string()).unwrap();
+    }
+    let addr = spawn(build_router(AppState::new(db, None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let provider = json!({ "id": "mock", "name": "模拟接口", "base_url": format!("http://{mock_addr}/v1"), "api_key": API_KEY });
+    c.put("/api/settings", json!({ "providers": [provider], "writer": { "provider_id": "mock", "model": "mock-writer" }, "analyst": { "provider_id": "mock", "model": "mock-analyst" } })).await;
+
+    let hot = c.get("/api/trends/hot").await;
+    assert_eq!((hot["items"].as_array().unwrap().len(), hot["fetched_at"].as_i64()), (2, Some(at)), "{hot}");
+    let r = c.get("/api/trends/rank?platform=qidian&kind=nope").await;
+    assert_eq!(r["books"][0]["title"], "开局签到系统", "不认识的榜单类型按月票榜");
+    assert_eq!(r["stats"]["categories"][0], json!(["东方玄幻", 2]));
+    assert!(r["stats"]["keywords"].as_array().unwrap().contains(&json!(["开局", 2])), "{}", r["stats"]);
+
+    let id = c.post("/api/books", json!({ "title": "测试书", "genre": "玄幻", "platform": "qidian", "synopsis": "少年得到签到系统" })).await["id"].as_i64().unwrap();
+    let (status, _) = c.send(reqwest::Method::POST, "/api/trends/memes", Some(json!({ "book_id": id + 100 }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let memes = c.post("/api/trends/memes", json!({ "book_id": id })).await;
+    assert_eq!(memes["memes"][0]["word"], "情绪价值");
+    let sent = seen.lock().unwrap().last().unwrap()["messages"].to_string();
+    assert!(sent.contains("微博｜情绪价值") && sent.contains("《测试书》"), "热搜和作品信息都要发给模型");
+
+    let pref = c.post("/api/trends/preference", json!({ "book_id": id })).await;
+    assert_eq!(pref["result"]["score"], 100, "字符串分数转成整数并夹到 0～100");
+    let basis = pref["basis"].as_str().unwrap();
+    assert!(basis.contains("起点月票榜") && !basis.contains("番茄"), "起点的书只看起点榜单：{basis}");
+    assert!(seen.lock().unwrap().last().unwrap()["messages"].to_string().contains("我的系统能开局"));
+
+    let usage = c.get(&format!("/api/books/{id}/declaration")).await["usage"].clone();
+    let group = |task: &str| usage.as_array().unwrap().iter().find(|u| u["tasks"].as_array().unwrap().contains(&json!(task))).map(|u| u["category"].as_str().unwrap().to_string());
+    assert_eq!((group("memes").as_deref(), group("preference").as_deref()), (Some("灵感与设定"), Some("分析与检查")));
 }
 
 /// 打印真实书稿某一章「写整章」的提示词，核对模型实际看到了什么。AI_NOVEL_CHECK_DB 指向数据库副本，AI_NOVEL_CHECK_CHAPTER 是章节 id（默认第一本书的第一章）。

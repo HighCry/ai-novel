@@ -5,6 +5,7 @@ pub mod declare;
 pub mod replace;
 pub mod teardown;
 pub mod timeline;
+pub mod trends;
 pub mod continuity;
 pub mod db;
 pub mod export;
@@ -64,6 +65,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/refbooks/{id}", get(teardown::get).patch(teardown::patch).delete(teardown::delete))
         .route("/refbooks/{id}/compare", get(teardown::compare))
         .route("/refchapters/{id}/analyze", post(teardown::analyze))
+        .route("/trends/hot", get(trends::hot))
+        .route("/trends/rank", get(trends::rank))
+        .route("/trends/memes", post(trends::memes))
+        .route("/trends/preference", post(trends::preference))
         .route("/books/{id}/volumes", get(list_volumes).post(create_volume))
         .route("/volumes/{id}", patch(patch_volume).delete(delete_volume))
         .route("/books/{id}/chapters", get(list_chapters).post(create_chapter))

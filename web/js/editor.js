@@ -6,6 +6,7 @@ import { openSettings, openBookSettings, openExport, openVersions, openStats, op
 import { attachAssist, pref } from './assist.js';
 import { libraryButton } from './stylelib.js';
 import { openReader } from './reader.js';
+import { openTrends } from './trends.js';
 
 let els = {};
 let dirty = false;
@@ -70,6 +71,7 @@ function topBar(layout) {
     h('button', { class: 'ghost', title: '整屏阅读正文，左右方向键翻章', onclick: () => openReader() }, '阅读'),
     h('button', { class: 'ghost', onclick: () => openExport() }, '导出'),
     h('button', { class: 'ghost', onclick: () => openStats() }, '统计'),
+    h('button', { class: 'ghost', title: '今天的热梗、起点和番茄榜单、读者偏好预测', onclick: () => openTrends() }, '热点'),
     h('button', { class: 'ghost', title: '爽点、钩子、冲突、润色等写作手册', onclick: () => openHandbook() }, '手册'),
     h('button', { class: 'ghost', title: '去 AI 味等写作技能：写正文时自动遵守，也能用来修订', onclick: () => openSkills() }, '技能'),
     libraryButton(),

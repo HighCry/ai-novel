@@ -99,6 +99,35 @@ type Vars = HashMap<&'static str, String>;
 /// 所有 JSON 任务都追加这条，作者改过模板也能保证格式（中文模型常在字符串里用英文引号）。
 pub const JSON_RULE: &str = "\n\n输出格式要求：只输出一个合法的 JSON 对象，不要加任何说明文字；JSON 字符串内部需要引号时用「」或“”，不要用英文双引号。";
 
+/// 读者能看到的作品信息：书名、题材、梗概、简介、金手指、写了多少、开篇三章；给挑梗和读者偏好预测用
+fn book_brief(d: &BookData) -> String {
+    let b = &d.book;
+    let mut s = format!("书名：《{}》\n平台：{}", b.title.trim(), prompts::platform_name(&b.platform));
+    for (label, v, n) in [("题材", &b.genre, 40), ("一句话梗概", &b.logline, 200), ("简介", &b.synopsis, 400), ("金手指", &b.golden_finger, 100)] {
+        if !v.trim().is_empty() {
+            s += &format!("\n{label}：{}", clip(v.trim(), n));
+        }
+    }
+    let written: Vec<&Chapter> = d.chapters.iter().filter(|c| !c.content.trim().is_empty()).collect();
+    s += &format!("\n已写：{} 章，{} 字", written.len(), written.iter().map(|c| c.word_count).sum::<i64>());
+    let opening: Vec<String> = written
+        .iter()
+        .take(3)
+        .map(|c| {
+            let gist = if c.summary.trim().is_empty() { &c.outline } else { &c.summary };
+            let mut line = format!("{}：{}", d.label(c), clip(gist.trim(), 150));
+            if let Some(h) = c.metrics["hook"]["type"].as_str().filter(|h| !h.is_empty()) {
+                line += &format!("（章末钩子：{h}）");
+            }
+            line
+        })
+        .collect();
+    if !opening.is_empty() {
+        s += &format!("\n开篇三章：\n{}", opening.join("\n"));
+    }
+    s
+}
+
 /// 拆书时每章最多发给模型的字数
 const TEARDOWN_CHARS: usize = 9000;
 
@@ -220,6 +249,22 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
         Prepared { role, messages: vec![Message::system(system), Message::user(user)], json }
     };
     match task {
+        "memes" | "preference" => {
+            let d = need(data)?;
+            if req.selection.trim().is_empty() {
+                return Err(bad_request("没有拿到热搜或榜单"));
+            }
+            let mut v = Vars::new();
+            v.insert("book_info", book_brief(d));
+            v.insert("platform", prompts::platform_name(&d.book.platform).to_string());
+            if task == "memes" {
+                v.insert("hot", req.selection.clone());
+            } else {
+                v.insert("ranks", req.selection.clone());
+                v.insert("basis", req.instruction.trim().to_string());
+            }
+            Ok(prepared(Role::Analyst, editor_system(&d.book.genre, ov), &format!("task.{task}"), &v, true))
+        }
         "teardown" => {
             if req.selection.trim().is_empty() {
                 return Err(bad_request("这一章没有正文"));

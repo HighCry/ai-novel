@@ -5,6 +5,7 @@ import { openWizard } from './wizard.js';
 import { openSettings, openImport, openHandbook, openSkills } from './dialogs.js';
 import { libraryButton } from './stylelib.js';
 import { openTeardown } from './teardown.js';
+import { openTrends } from './trends.js';
 
 const PLATFORM = { fanqie: '番茄', qidian: '起点' };
 
@@ -23,6 +24,7 @@ export async function renderShelf(root) {
     h('button', { class: 'ghost', title: '去 AI 味等写作技能：写正文时自动遵守，也能用来修订', onclick: () => openSkills() }, '写作技能'),
     libraryButton(),
     h('button', { class: 'ghost', title: '导入同类爆款，拆解开头、张力、爽点和钩子，只学结构', onclick: () => openTeardown() }, '拆书'),
+    h('button', { class: 'ghost', title: '今天的热梗、起点和番茄榜单、读者偏好预测', onclick: () => openTrends() }, '热点'),
     themeButton(),
     h('button', { class: 'ghost', onclick: () => openSettings() }, '设置'));
   root.append(h('div', { class: 'shell' },
