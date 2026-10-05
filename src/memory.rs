@@ -1,7 +1,9 @@
 //! 长篇记忆：把设定库、分层摘要、伏笔、相关前文片段组装成有字数预算的上下文。
+//! 写某一章时先按可见性剔除这一章还不该看见的资料（见 visibility.rs），再按预算装配。
 
 use crate::models::*;
 use crate::text::*;
+use crate::visibility::{visible_text, Point};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -28,10 +30,13 @@ impl BookData {
     }
 
     /// 和给定条目有关的关系，一行一条；已结束的关系标注出来，避免写成还很亲密。
-    pub fn relation_lines(&self, ids: &HashSet<i64>) -> Vec<String> {
+    /// 写某一章时只给这一章及之前建立的关系。
+    pub fn relation_lines(&self, ids: &HashSet<i64>, current: Option<&Chapter>) -> Vec<String> {
+        let cur = current.and_then(|c| self.position(c.id));
         self.relations
             .iter()
             .filter(|r| ids.contains(&r.a_id) || ids.contains(&r.b_id))
+            .filter(|r| self.not_after(r.since_chapter_id, cur))
             .filter(|r| r.status != "ended" || (ids.contains(&r.a_id) && ids.contains(&r.b_id)))
             .filter_map(|r| {
                 let mut line = format!("· {} 与 {}：{}", self.entry_name(r.a_id)?, self.entry_name(r.b_id)?, r.kind.trim());
@@ -64,7 +69,11 @@ impl BookData {
             .filter_map(|s| self.state_key(s).map(|k| (s, k)))
             .collect();
         if snaps.is_empty() {
-            return e.state_text();
+            // 没有快照时只知道最新状态：回改前面的章节（后面已经写了）就不给，免得用上后文的状态
+            let later_written = current
+                .and_then(|c| self.position(c.id))
+                .is_some_and(|p| self.chapters[p + 1..].iter().any(|c| !c.content.trim().is_empty()));
+            return if later_written { String::new() } else { e.state_text() };
         }
         let cur = current.and_then(|c| self.position(c.id)).map(|p| p as i64);
         snaps
@@ -104,6 +113,63 @@ impl BookData {
             Some(i) => &self.chapters[..i],
             None => &self.chapters,
         }
+    }
+
+    /// 挂在某一章上的资料，写第 cur 章时能不能看见：本章及之前的可以；章节不明或没有当前章节时照旧给。
+    fn not_after(&self, chapter_id: Option<i64>, cur: Option<usize>) -> bool {
+        match (chapter_id.and_then(|id| self.position(id)), cur) {
+            (Some(pos), Some(cur)) => pos <= cur,
+            _ => true,
+        }
+    }
+
+    /// 写这一章时所处的位置：第几卷（按卷的先后数）、第几章。
+    pub fn point(&self, ch: &Chapter) -> Point {
+        let volume = ch.volume_id.and_then(|vid| self.volumes.iter().position(|v| v.id == vid)).map_or(1, |i| i as i64 + 1);
+        Point { volume, chapter: self.number(ch) }
+    }
+
+    /// 没有当前章节（规划类任务）时为 None，看作者层。
+    pub fn at(&self, current: Option<&Chapter>) -> Option<Point> {
+        current.map(|c| self.point(c))
+    }
+
+    pub fn uses_volumes(&self) -> bool {
+        !self.volumes.is_empty()
+    }
+
+    /// 写到 current 时可以给模型看的世界观；没有当前章节时只去掉对 AI 隐藏的节。
+    pub fn world_at(&self, current: Option<&Chapter>) -> String {
+        visible_text(&self.book.worldview, self.at(current), self.uses_volumes())
+    }
+
+    pub fn outline_at(&self, current: Option<&Chapter>) -> String {
+        visible_text(&self.book.outline, self.at(current), self.uses_volumes())
+    }
+
+    /// 卷纲本身属于某一卷，里面只按标记和「结局」「真相」这类标题筛。
+    pub fn volume_outline_at(&self, v: &Volume, current: Option<&Chapter>) -> String {
+        visible_text(&v.outline, self.at(current), false)
+    }
+
+    /// 写到 current 时可以给模型看的设定条目。
+    pub fn entries_at(&self, current: Option<&Chapter>) -> Vec<&Entry> {
+        let at = self.at(current);
+        self.entries.iter().filter(|e| e.gate().open_at(at)).collect()
+    }
+
+    /// 写 current 这一章时还没回收的伏笔：本章及之前埋下、到本章时还没回收的。
+    pub fn open_threads(&self, current: Option<&Chapter>) -> Vec<&Thread> {
+        let cur = current.and_then(|c| self.position(c.id));
+        let resolved_later = |t: &Thread| match (t.resolved_chapter_id.and_then(|id| self.position(id)), cur) {
+            (Some(r), Some(c)) => r >= c,
+            _ => false,
+        };
+        self.threads
+            .iter()
+            .filter(|t| self.not_after(t.planted_chapter_id, cur))
+            .filter(|t| t.status == "open" || resolved_later(t))
+            .collect()
     }
 }
 
@@ -218,9 +284,9 @@ pub fn render_entry(e: &Entry, state: &str) -> String {
 }
 
 /// 找出在文本里出场的设定条目（常驻条目总是带上），按出现次数排序。
-pub fn match_entries<'a>(entries: &'a [Entry], scan: &str) -> Vec<&'a Entry> {
+pub fn match_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>, scan: &str) -> Vec<&'a Entry> {
     let mut hits: Vec<(&Entry, usize)> = entries
-        .iter()
+        .into_iter()
         .filter_map(|e| {
             let n: usize = e
                 .keywords()
@@ -275,17 +341,24 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
     }
     out.push(Section { title: "作品信息".into(), body: info });
 
-    if o.include_world && !book.worldview.trim().is_empty() {
-        out.push(Section { title: "世界观".into(), body: clip(&book.worldview, b * 12 / 100) });
+    if o.include_world {
+        let world = data.world_at(o.current);
+        if !world.trim().is_empty() {
+            out.push(Section { title: "世界观".into(), body: clip(&world, b * 12 / 100) });
+        }
     }
 
     let cur_vol = o.current.and_then(|c| c.volume_id).and_then(|vid| data.volumes.iter().find(|v| v.id == vid));
     if o.include_outline {
-        if !book.outline.trim().is_empty() {
-            out.push(Section { title: "总纲".into(), body: clip(&book.outline, b * 10 / 100) });
+        let outline = data.outline_at(o.current);
+        if !outline.trim().is_empty() {
+            out.push(Section { title: "总纲".into(), body: clip(&outline, b * 10 / 100) });
         }
-        if let Some(v) = cur_vol.filter(|v| !v.outline.trim().is_empty()) {
-            out.push(Section { title: format!("本卷卷纲（{}）", v.title), body: clip(&v.outline, b * 8 / 100) });
+        if let Some(v) = cur_vol {
+            let vo = data.volume_outline_at(v, o.current);
+            if !vo.trim().is_empty() {
+                out.push(Section { title: format!("本卷卷纲（{}）", v.title), body: clip(&vo, b * 8 / 100) });
+            }
         }
     }
 
@@ -337,12 +410,12 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
     if let Some(p) = prev.last() {
         scan.push_str(&tail_chars(&p.content, 1500));
     }
-    let matched = match_entries(&data.entries, &scan);
+    let matched = match_entries(data.entries_at(o.current), &scan);
     if !matched.is_empty() {
         let lines = matched.iter().map(|e| render_entry(e, &data.state_at(e, o.current))).collect();
         out.push(Section { title: "相关设定（必须遵守）".into(), body: take_within(lines, b * 22 / 100) });
         let ids: HashSet<i64> = matched.iter().map(|e| e.id).collect();
-        let rels = data.relation_lines(&ids);
+        let rels = data.relation_lines(&ids, o.current);
         if !rels.is_empty() {
             out.push(Section { title: "人物关系".into(), body: take_within(rels, b * 6 / 100) });
         }
@@ -351,9 +424,8 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
     // 未回收伏笔
     let cur_num = o.current.and_then(|c| data.number(c));
     let open: Vec<String> = data
-        .threads
-        .iter()
-        .filter(|t| t.status == "open")
+        .open_threads(o.current)
+        .into_iter()
         .map(|t| {
             let planted = t.planted_chapter_id.and_then(|id| data.chapter(id));
             let mut line = format!("· {}", t.title.trim());
@@ -446,9 +518,55 @@ mod tests {
             Relation { id: 2, a_id: 1, b_id: 3, kind: "盟友".into(), status: "ended".into(), ..Default::default() },
         ];
         let only_lin: HashSet<i64> = [1].into_iter().collect();
-        assert_eq!(data.relation_lines(&only_lin), vec!["· 林凡 与 苏雨：师姐弟".to_string()]);
+        assert_eq!(data.relation_lines(&only_lin, None), vec!["· 林凡 与 苏雨：师姐弟".to_string()]);
         let both: HashSet<i64> = [1, 3].into_iter().collect();
-        assert!(data.relation_lines(&both).iter().any(|l| l.contains("这段关系已经结束")));
+        assert!(data.relation_lines(&both, None).iter().any(|l| l.contains("这段关系已经结束")));
+    }
+
+    #[test]
+    fn compose_keeps_unopened_material_out() {
+        let mut data = sample();
+        data.volumes = vec![Volume { id: 1, title: "第一卷".into(), outline: "### 前十章\n进城拍卖\n### 本卷收尾〔仅规划〕\n林凡登顶青云城".into(), sort: 1, ..Default::default() }];
+        for c in &mut data.chapters {
+            c.volume_id = Some(1);
+        }
+        data.book.worldview = "灵气复苏的世界\n### 青云城\n城里很热闹\n### 天道真相\n天道是伪神\n### 上界〔第2卷起〕\n九霄天轨\n### 作者备注\n林凡是转世仙帝".into();
+        data.book.outline = "### 核心主线\n林凡最终成神\n### 第一卷\n进城\n### 第二卷\n飞升灵界".into();
+        data.entries[1].description = "青云城的医女".into();
+        data.entries[1].secret = "魔教圣女".into();
+        data.entries[1].always_include = true;
+        data.entries.push(Entry { id: 4, name: "魔尊".into(), kind: "character".into(), visibility: "第2卷起".into(), always_include: true, ..Default::default() });
+        data.entries.push(Entry { id: 5, name: "玉佩器灵".into(), kind: "character".into(), visibility: "对AI隐藏".into(), always_include: true, ..Default::default() });
+        data.relations = vec![Relation { id: 1, a_id: 1, b_id: 2, kind: "道侣".into(), status: "active".into(), since_chapter_id: Some(3), ..Default::default() }];
+        data.threads.push(Thread { id: 2, title: "拍卖会上的神秘人".into(), status: "open".into(), planted_chapter_id: Some(3), ..Default::default() });
+        data.threads.push(Thread { id: 3, title: "城门守卫的暗号".into(), status: "resolved".into(), planted_chapter_id: Some(1), resolved_chapter_id: Some(3), ..Default::default() });
+
+        let ch2 = Chapter { outline: "林凡在青云城遇见苏雨".into(), ..data.chapter(2).cloned().unwrap() };
+        let opts = |cur| ComposeOpts { current: cur, focus_text: "", instruction: "", budget: 12000, include_world: true, include_outline: true };
+        let text = render(&compose(&data, &opts(Some(&ch2))));
+        for want in ["城里很热闹", "【总纲】\n### 第一卷\n进城", "进城拍卖", "青云城的医女", "城门守卫的暗号", "黑色玉佩的来历"] {
+            assert!(text.contains(want), "缺少「{want}」：\n{text}");
+        }
+        for leak in ["伪神", "九霄天轨", "转世仙帝", "最终成神", "飞升灵界", "登顶青云城", "魔教圣女", "魔尊", "玉佩器灵", "道侣", "神秘人", "〔"] {
+            assert!(!text.contains(leak), "第2章不该看到「{leak}」：\n{text}");
+        }
+
+        let planning = render(&compose(&data, &opts(None)));
+        for want in ["伪神", "九霄天轨", "最终成神", "飞升灵界", "魔尊"] {
+            assert!(planning.contains(want), "规划要看到作者层「{want}」：\n{planning}");
+        }
+        for never in ["转世仙帝", "魔教圣女", "玉佩器灵"] {
+            assert!(!planning.contains(never), "对 AI 隐藏的和作者底牌任何任务都不给：「{never}」");
+        }
+    }
+
+    #[test]
+    fn state_without_snapshots_not_leaked_when_revising() {
+        let data = sample();
+        let lin = data.entries[0].clone();
+        assert_eq!(data.state_at(&lin, data.chapter(1)), "", "回改第1章时后面已经写了，不能拿最新状态当那时的状态");
+        assert_eq!(data.state_at(&lin, data.chapter(4)), "炼气三层", "写新章节时最新状态就是当前状态");
+        assert_eq!(data.state_at(&lin, None), "炼气三层");
     }
 
     #[test]

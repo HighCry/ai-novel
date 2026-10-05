@@ -1,4 +1,4 @@
-//! 免费的连续性体检：不调用模型，按规则检查伏笔、人物出场、状态和节奏。
+//! 免费的连续性体检：不调用模型，按规则检查伏笔、人物出场、状态和节奏；设定超前、境界、物品等叙事逻辑检查见 logic.rs。
 //! 检查项参考 Novel-OS 的 continuity_engine（MIT），阈值按网文节奏调整。
 
 use crate::memory::BookData;
@@ -14,6 +14,9 @@ pub struct Finding {
     pub chapter_id: Option<i64>,
     pub entry_id: Option<i64>,
     pub thread_id: Option<i64>,
+    /// 原文依据：规则检查找到的那一句
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub quote: String,
 }
 
 /// 网文伏笔周期比 Novel-OS 默认的 3 章长得多
@@ -25,8 +28,8 @@ const LOW_TENSION_STREAK: usize = 3;
 const NO_COOL_POINT_STREAK: usize = 5;
 const DEATH_WORDS: [&str; 7] = ["死亡", "已死", "身亡", "阵亡", "牺牲", "死了", "去世"];
 
-fn finding(level: &str, kind: &str, message: String) -> Finding {
-    Finding { level: level.into(), kind: kind.into(), message, chapter_id: None, entry_id: None, thread_id: None }
+pub(crate) fn finding(level: &str, kind: &str, message: String) -> Finding {
+    Finding { level: level.into(), kind: kind.into(), message, chapter_id: None, entry_id: None, thread_id: None, quote: String::new() }
 }
 
 fn mentions(e: &Entry, text: &str) -> bool {
@@ -35,6 +38,14 @@ fn mentions(e: &Entry, text: &str) -> bool {
 
 fn is_dead(state: &str) -> bool {
     DEATH_WORDS.iter().any(|w| state.contains(w))
+}
+
+/// 人物自己是死是活只看身体、实力、位置；「知道的秘密」「近期经历」里常写别人的死，不能算到他头上。
+fn vital(fields: &std::collections::BTreeMap<String, String>, state: &str) -> String {
+    if fields.is_empty() {
+        return state.to_string();
+    }
+    ["body", "power", "location"].iter().filter_map(|k| fields.get(*k)).cloned().collect::<Vec<_>>().join("；")
 }
 
 pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
@@ -93,12 +104,12 @@ pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
         let death = d
             .states
             .iter()
-            .filter(|s| s.entry_id == e.id && is_dead(&s.text()))
+            .filter(|s| s.entry_id == e.id && is_dead(&vital(&s.fields, &s.state)))
             .filter_map(|s| s.chapter_id.and_then(|cid| d.chapters.iter().position(|c| c.id == cid)))
             .min();
         let after: Vec<&Chapter> = match death {
             Some(pos) => d.chapters[pos + 1..].iter().collect(),
-            None if is_dead(&e.state_text()) => current.into_iter().collect(),
+            None if is_dead(&vital(&e.fields, &e.state)) => current.into_iter().collect(),
             None => Vec::new(),
         };
         if let Some(c) = after.into_iter().find(|c| mentions(e, &c.content)) {
@@ -161,6 +172,8 @@ pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
     }
     flush_dry(&mut dry, &mut out);
 
+    out.extend(crate::logic::check(d));
+
     let rank = |l: &str| match l {
         "critical" => 0,
         "warn" => 1,
@@ -193,7 +206,11 @@ mod tests {
             Entry { id: 2, kind: "character".into(), name: "苏雨".into(), role: "重要配角".into(), ..Default::default() },
             Entry { id: 3, kind: "character".into(), name: "张三".into(), ..Default::default() },
         ];
-        let states = vec![EntryState { id: 1, entry_id: 3, chapter_id: Some(2), phase: "end".into(), state: "被林凡所杀，已死亡".into(), ..Default::default() }];
+        let knows_death = [("knows".to_string(), "知道张三已死亡".to_string()), ("body".to_string(), "无伤".to_string())].into_iter().collect();
+        let states = vec![
+            EntryState { id: 1, entry_id: 3, chapter_id: Some(2), phase: "end".into(), state: "被林凡所杀，已死亡".into(), ..Default::default() },
+            EntryState { id: 2, entry_id: 1, chapter_id: Some(2), phase: "end".into(), fields: knows_death, ..Default::default() },
+        ];
         let threads = vec![
             Thread { id: 1, title: "玉佩".into(), status: "open".into(), planted_chapter_id: Some(1), target_chapter: Some(5), ..Default::default() },
             Thread { id: 2, title: "身世".into(), status: "resolved".into(), ..Default::default() },

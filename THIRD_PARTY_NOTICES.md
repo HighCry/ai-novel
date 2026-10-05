@@ -30,6 +30,8 @@
 | `src/skills/deslop.md`（内置技能「网文去AI味」） | oh-story-claudecode `skills/story-deslop/`（`SKILL.md`、`references/anti-ai-writing.md`、`references/banned-words.md`）；novel-studio `anti-ai-writing.md` | MIT / Apache-2.0 | 写作规则（深度限知视角、逗号长句的句长基准、禁用句式和词表）、去 AI 三遍法、防止矫枉过正的条目和改写范例，按本项目的用法重写和精简 |
 | `src/prompts.rs` | webnovel-writer `agents/reviewer.md`、`references/shared/cool-points-guide.md`；novel-studio `hooks-chapter.md` | GPL-3.0 / Apache-2.0 | 一致性检查的五个类别与“只报有证据的问题”原则；节拍规划中的爽点三段式、章末钩子类型；章节张力分析的爽点与钩子分类 |
 | 人物结构化状态 | StoryForge 角色动态状态 6 字段 | MIT | 字段设计（位置、实力、身体、心理、关键物品、近期经历），另加“知道的秘密 / 还不知道的事” |
+| `src/prompts.rs`（写作系统提示第 10 条「信息投放」、第 1 章开篇要求） | [miserylee/webnovel-handbook](https://github.com/miserylee/webnovel-handbook) `docs/storycraft/28-worldbuilding-setting-exposition.md`、`docs/core-writing/69-pov-narrative-distance-information-focus.md` | MIT | 冰山原则（作者知道十成、正文先露一成）、设定随行动和后果带出、第一章新名词不超过三个、不写等级大全和金手指说明书、旁白不替视角人物说破，按本项目的提示词风格重写 |
+| `src/logic.rs`（新名词过多、大段纯设定） | webnovel-handbook `docs/storycraft/28-worldbuilding-setting-exposition.md` | MIT | 每章新名词上限和“设定扎堆、没有动作和对话”的判断思路，用 Rust 重新实现，阈值按本项目调整 |
 
 ## 关于 StoryForge 的许可证
 
@@ -38,3 +40,5 @@ StoryForge 的 README 声明 “MIT License”，但仓库（2026-05-17 的提�
 ## 只借鉴思路、没有使用其代码或文本的项目
 
 [blader/humanizer](https://github.com/blader/humanizer)（MIT，借鉴“改完后再自问哪里还像 AI”的复查思路）、[sam-paech/slop-score](https://github.com/sam-paech/slop-score)（按密度而不是分类器衡量 AI 腔的思路）、[MaoXiaoYuZ/Long-Novel-GPT](https://github.com/MaoXiaoYuZ/Long-Novel-GPT)（未声明许可证）、[aiyinluya/wenmai](https://github.com/aiyinluya/wenmai)（未附许可证）、[QishanHe/PlotPilot](https://github.com/QishanHe/PlotPilot)（Apache-2.0 + Commons Clause，与 AGPL 不兼容），以及 Novelcrafter、Sudowrite 等商业产品。
+
+`src/visibility.rs` 的可见性设计借鉴了 Novelcrafter 的 Progressions（设定按稿件位置生效）和马良写作的「设定可见性」（对 AI 隐藏、按卷渐进开放，可见性先于上下文装配），`src/logic.rs` 的境界、物品检查借鉴了 FactTrack（NAACL 2025）按时间入账再比对的思路，都只参考设计，没有使用其代码或文字。

@@ -202,6 +202,11 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 "#;
 
+const SCHEMA_V6: &str = r#"
+ALTER TABLE entries ADD COLUMN visibility TEXT NOT NULL DEFAULT '';
+ALTER TABLE entries ADD COLUMN secret TEXT NOT NULL DEFAULT '';
+"#;
+
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
 fn lib_item_row(r: &Row) -> rusqlite::Result<LibItem> {
@@ -317,7 +322,7 @@ pub struct AiLog<'a> {
 const BOOK_COLS: &str = "id, title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at";
 const VOL_COLS: &str = "id, book_id, title, outline, summary, sort";
 const CH_COLS: &str = "id, book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics";
-const ENTRY_COLS: &str = "id, book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields";
+const ENTRY_COLS: &str = "id, book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret";
 const THREAD_COLS: &str = "id, book_id, title, detail, status, planted_chapter_id, resolved_chapter_id, updated_at, target_chapter, last_chapter_id";
 
 fn book_row(r: &Row) -> rusqlite::Result<Book> {
@@ -376,6 +381,8 @@ fn entry_row(r: &Row) -> rusqlite::Result<Entry> {
         updated_at: r.get(9)?,
         role: r.get(10)?,
         fields: json_map(r.get(11)?),
+        visibility: r.get(12)?,
+        secret: r.get(13)?,
     })
 }
 
@@ -441,6 +448,9 @@ impl Db {
         }
         if version < 5 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
+        }
+        if version < 6 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
         }
         Ok(Self { conn: Arc::new(Mutex::new(conn)), lib_rev: Arc::new(AtomicU64::new(1)) })
     }
@@ -791,8 +801,8 @@ impl Db {
         let id = {
             let c = self.c();
             c.execute(
-                "INSERT INTO entries (book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO entries (book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     e.book_id,
                     normalize_kind(&e.kind),
@@ -804,7 +814,9 @@ impl Db {
                     e.always_include,
                     now(),
                     e.role.trim(),
-                    map_json(&e.fields)
+                    map_json(&e.fields),
+                    e.visibility.trim(),
+                    e.secret
                 ],
             )?;
             c.last_insert_rowid()
@@ -815,7 +827,7 @@ impl Db {
     pub fn update_entry(&self, e: &Entry) -> Result<()> {
         self.c().execute(
             "UPDATE entries SET kind = ?2, name = ?3, aliases = ?4, description = ?5, state = ?6, immutable = ?7, always_include = ?8, updated_at = ?9,
-             role = ?10, fields = ?11 WHERE id = ?1",
+             role = ?10, fields = ?11, visibility = ?12, secret = ?13 WHERE id = ?1",
             params![
                 e.id,
                 normalize_kind(&e.kind),
@@ -827,7 +839,9 @@ impl Db {
                 e.always_include,
                 now(),
                 e.role.trim(),
-                map_json(&e.fields)
+                map_json(&e.fields),
+                e.visibility.trim(),
+                e.secret
             ],
         )?;
         Ok(())

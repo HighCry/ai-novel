@@ -121,6 +121,43 @@ fn cn_under_10000(n: i64) -> String {
     s
 }
 
+/// 解析阿拉伯数字或中文数字：12、１２、十二、九十一、一百零五、两千。解析不了返回 None。
+pub fn parse_cn_number(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let ascii: String = s.chars().map(|c| if ('０'..='９').contains(&c) { char::from_u32(c as u32 - 0xFEE0).unwrap_or(c) } else { c }).collect();
+    if let Ok(n) = ascii.parse::<i64>() {
+        return Some(n);
+    }
+    let (mut total, mut section, mut num, mut seen) = (0i64, 0i64, 0i64, false);
+    for c in s.chars() {
+        if let Some(d) = CN_DIGITS.iter().position(|x| x.starts_with(c)).or(match c {
+            '〇' => Some(0),
+            '两' => Some(2),
+            _ => None,
+        }) {
+            num = d as i64;
+            seen = true;
+            continue;
+        }
+        let unit = match c {
+            '十' => 10,
+            '百' => 100,
+            '千' => 1000,
+            '万' => 10000,
+            _ => return None,
+        };
+        seen = true;
+        if unit == 10000 {
+            total += (section + num) * unit;
+            section = 0;
+        } else {
+            section += num.max(1) * unit;
+        }
+        num = 0;
+    }
+    seen.then_some(total + section + num)
+}
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
@@ -331,6 +368,13 @@ mod tests {
         assert_eq!(cn_number(110), "一百一十");
         assert_eq!(cn_number(1010), "一千零一十");
         assert_eq!(cn_number(12345), "一万二千三百四十五");
+        for n in [1, 9, 10, 15, 20, 91, 105, 110, 200, 1010, 12345] {
+            assert_eq!(parse_cn_number(&cn_number(n)), Some(n), "{n}");
+        }
+        assert_eq!(parse_cn_number("两百"), Some(200));
+        assert_eq!(parse_cn_number("１２"), Some(12));
+        assert_eq!(parse_cn_number("三重"), None);
+        assert_eq!(parse_cn_number(""), None);
     }
 
     #[test]

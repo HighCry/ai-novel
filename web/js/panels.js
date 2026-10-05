@@ -350,6 +350,8 @@ function biblePanel(body) {
           h('b', null, e.name),
           e.role ? h('span', { class: 'muted small' }, e.role) : null,
           e.always_include ? h('span', { class: 'badge' }, '常驻') : null,
+          e.visibility ? h('span', { class: 'badge gray', title: '可见性：写到这里之前 AI 看不到这条设定' }, e.visibility) : null,
+          e.secret ? h('span', { class: 'badge gray', title: '有作者底牌，任何时候都不发给 AI' }, '底牌') : null,
           present ? h('span', { class: 'badge green' }, '本章出场') : null),
         e.aliases ? h('div', { class: 'muted small' }, '又称：' + e.aliases) : null,
         e.state ? h('div', { class: 'entry-state' }, e.state) : null,
@@ -460,14 +462,20 @@ async function runContinuity(out) {
   if (!list.some((f) => f.kind === '张力偏低' || f.kind === '爽点断档')) {
     out.append(h('p', { class: 'hint' }, '节奏检查需要先对章节做「定稿」，定稿时会顺带分析张力和爽点。'));
   }
+  if (!store.entries.some((e) => e.visibility)) {
+    out.append(h('p', { class: 'hint' }, '给后期才登场或揭晓的设定设上可见性（编辑设定 → 可见性），体检就能查出提前写出来的地方。'));
+  }
   for (const f of list) {
-    const target = () => {
-      if (f.chapter_id) store.editor.open(f.chapter_id);
-      else if (f.entry_id) { const e = store.entries.find((x) => x.id === f.entry_id); if (e) openEntry(e); } else if (f.thread_id) { const t = store.threads.find((x) => x.id === f.thread_id); if (t) openThread(t); }
+    const target = async () => {
+      if (f.chapter_id) {
+        await store.editor.open(f.chapter_id);
+        if (f.quote) locate(f.quote.replace(/……$/, ''));
+      } else if (f.entry_id) { const e = store.entries.find((x) => x.id === f.entry_id); if (e) openEntry(e); } else if (f.thread_id) { const t = store.threads.find((x) => x.id === f.thread_id); if (t) openThread(t); }
     };
     out.append(h('div', { class: 'issue clickable ' + (f.level === 'critical' ? 'high' : f.level === 'warn' ? 'medium' : 'low'), onclick: target },
       h('div', { class: 'issue-head' }, h('span', { class: 'tag' }, f.kind)),
-      h('div', { class: 'small' }, f.message)));
+      h('div', { class: 'small' }, f.message),
+      f.quote ? h('blockquote', null, f.quote) : null));
   }
 }
 

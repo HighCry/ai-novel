@@ -643,3 +643,80 @@ async fn writing_skills_flow() {
     let (status, v) = c.send(reqwest::Method::POST, "/api/skills", Some(json!({ "markdown": "<!DOCTYPE html><html></html>" }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
 }
+
+#[tokio::test]
+async fn visibility_red_line() {
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let world = "矿奴求生的世界\n### 矿区\n赤炼宗黑灵矿\n### 世界真相\n天轨是伪神铸造的锁链\n### 上界〔第2卷起〕\n九霄天轨";
+    let outline = "### 核心主线\n最终成为执秤真皇\n### 第一卷\n矿区求生\n### 第二卷\n灵台点灯";
+    let book = c.post("/api/books", json!({ "title": "大梦", "worldview": world, "outline": outline })).await;
+    let bid = book["id"].as_i64().unwrap();
+    let v1 = c.post(&format!("/api/books/{bid}/volumes"), json!({ "title": "第一卷" })).await;
+    let ch1 = c.post(&format!("/api/books/{bid}/chapters"), json!({ "title": "矿难", "volume_id": v1["id"], "outline": "陈渊在矿道里遇到姜沉雪" })).await;
+    let cid = ch1["id"].as_i64().unwrap();
+
+    // 条目的可见性按统一写法存，看不懂的写法直接报错
+    let jiang = c
+        .post(&format!("/api/books/{bid}/entries"), json!({ "name": "姜沉雪", "kind": "character", "description": "回春堂的医修", "secret": "逆命司第七席", "visibility": "公开" }))
+        .await;
+    assert_eq!((jiang["visibility"].as_str(), jiang["secret"].as_str()), (Some(""), Some("逆命司第七席")));
+    let god = c.post(&format!("/api/books/{bid}/entries"), json!({ "name": "伪神", "kind": "concept", "always_include": true, "visibility": "3卷" })).await;
+    assert_eq!(god["visibility"], "第3卷起");
+    let (status, v) = c.send(reqwest::Method::PATCH, &format!("/api/entries/{}", god["id"]), Some(json!({ "visibility": "以后再说" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+
+    // 第1章：后期的世界观、总纲、设定和作者底牌都不给模型
+    let ctx = c.get(&format!("/api/books/{bid}/context?chapter_id={cid}")).await;
+    let text = ctx["sections"].to_string();
+    assert!(text.contains("赤炼宗黑灵矿") && text.contains("矿区求生") && text.contains("回春堂的医修"), "{text}");
+    for leak in ["伪神", "九霄天轨", "执秤真皇", "灵台点灯", "逆命司第七席", "〔"] {
+        assert!(!text.contains(leak), "第1章的上下文不该有「{leak}」：{text}");
+    }
+    assert_eq!(ctx["withheld"]["worldview"], json!(["世界真相", "上界"]));
+    assert_eq!(ctx["withheld"]["outline"], json!(["核心主线", "第二卷"]));
+    assert_eq!(ctx["withheld"]["entries"], json!([{ "id": god["id"], "name": "伪神", "visibility": "第3卷起" }]));
+
+    let pv = c.post("/api/ai/preview", json!({ "task": "write_chapter", "book_id": bid, "chapter_id": cid })).await;
+    let (system, user) = (pv["messages"][0]["content"].as_str().unwrap(), pv["messages"][1]["content"].as_str().unwrap());
+    assert!(system.contains("信息投放") && user.contains("新名词最多三个"), "写作规则和第1章开篇要求带上信息投放");
+    assert!(!["伪神", "九霄天轨", "执秤真皇", "逆命司第七席"].iter().any(|w| user.contains(w)), "{user}");
+
+    // 规划看作者层，但对 AI 隐藏的和作者底牌照样不给
+    let pv = c.post("/api/ai/preview", json!({ "task": "chapter_outlines", "book_id": bid, "count": 3 })).await;
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains("天轨是伪神铸造的锁链") && user.contains("执秤真皇") && user.contains("设定「伪神」"), "{user}");
+    assert!(!user.contains("逆命司第七席"));
+
+    // 分节可见性：列出来、改一节、马上生效
+    let vis = c.get(&format!("/api/books/{bid}/visibility")).await;
+    let parts = vis["worldview"].as_array().unwrap();
+    let gate_of = |title: &str| parts.iter().find(|p| p["title"] == title).map(|p| p["gate"].clone()).unwrap();
+    assert_eq!((gate_of("矿区"), gate_of("世界真相"), gate_of("上界")), (json!("公开"), json!("仅规划"), json!("第2卷起")));
+    let mine = parts.iter().find(|p| p["title"] == "矿区").unwrap()["index"].clone();
+    let vis = c.post(&format!("/api/books/{bid}/visibility"), json!({ "field": "worldview", "index": mine, "visibility": "第2卷起" })).await;
+    assert!(vis["worldview"].as_array().unwrap().iter().any(|p| p["title"] == "矿区" && p["marked"] == "第2卷起"));
+    assert!(c.get(&format!("/api/books/{bid}")).await["worldview"].as_str().unwrap().contains("### 矿区〔第2卷起〕"));
+    assert!(!c.get(&format!("/api/books/{bid}/context?chapter_id={cid}")).await["sections"].to_string().contains("赤炼宗黑灵矿"));
+    let (status, _) = c.send(reqwest::Method::POST, &format!("/api/books/{bid}/visibility"), Some(json!({ "field": "worldview", "index": 0, "visibility": "仅规划" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "开头没有标题的部分不能加标记");
+}
+
+/// 拿真实书稿跑一遍体检，看规则检查在实际稿子上报了什么。AI_NOVEL_CHECK_DB 指向一份数据库副本（打开时会升级表结构，别指向正在用的库）。
+/// AI_NOVEL_CHECK_DB=副本路径 cargo test --test api real_book_checks -- --ignored --nocapture
+#[test]
+#[ignore]
+fn real_book_checks() {
+    let Some(path) = std::env::var_os("AI_NOVEL_CHECK_DB") else { return };
+    let db = Db::open(std::path::Path::new(&path)).unwrap();
+    for b in db.list_books().unwrap() {
+        let data = ai_novel::api::load_book_data(&db, b.id).unwrap();
+        println!("== 《{}》", b.title);
+        for f in ai_novel::continuity::check(&data, None) {
+            println!("[{}] {}：{}", f.level, f.kind, f.message);
+            if !f.quote.is_empty() {
+                println!("    原文：{}", f.quote);
+            }
+        }
+    }
+}

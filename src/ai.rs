@@ -143,8 +143,8 @@ fn brief_from(req: &AiRequest, data: Option<&BookData>) -> Brief {
         let v = field(f, "characters");
         if v.is_empty() {
             data.map(|d| {
-                d.entries
-                    .iter()
+                d.entries_at(None)
+                    .into_iter()
                     .filter(|e| e.kind == "character")
                     .map(|e| render_entry(e, &d.state_at(e, None)))
                     .collect::<Vec<_>>()
@@ -155,6 +155,8 @@ fn brief_from(req: &AiRequest, data: Option<&BookData>) -> Brief {
             v
         }
     };
+    let world = data.map(|d| d.world_at(None));
+    let outline = data.map(|d| d.outline_at(None));
     Brief {
         title: pick("title", book.map(|b| &b.title)),
         genre: pick("genre", book.map(|b| &b.genre)),
@@ -162,9 +164,9 @@ fn brief_from(req: &AiRequest, data: Option<&BookData>) -> Brief {
         idea: field(f, "idea"),
         protagonist: field(f, "protagonist"),
         logline: pick("logline", book.map(|b| &b.logline)),
-        worldview: pick("worldview", book.map(|b| &b.worldview)),
+        worldview: pick("worldview", world.as_ref()),
         characters,
-        outline: pick("outline", book.map(|b| &b.outline)),
+        outline: pick("outline", outline.as_ref()),
     }
 }
 
@@ -345,7 +347,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             let d = need(data)?;
             let e = req.entry_id.and_then(|id| d.entries.iter().find(|e| e.id == id)).ok_or_else(|| not_found("人物"))?;
             let convo: String = req.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
-            let related = match_entries(&d.entries, &format!("{}\n{}", e.description, convo))
+            let related = match_entries(d.entries_at(None), &format!("{}\n{}", e.description, convo))
                 .into_iter()
                 .filter(|x| x.id != e.id && !x.always_include)
                 .take(6)
@@ -369,7 +371,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             .collect::<Vec<_>>()
             .join("\n");
             v.insert("profile", profile);
-            v.insert("worldview_block", titled_block("世界观", &d.book.worldview, 1200));
+            v.insert("worldview_block", titled_block("世界观", &d.world_at(None), 1200));
             v.insert("related_block", titled_block("相关人物和设定", &related, 1500));
             let skip = history.len().saturating_sub(24);
             let mut messages = vec![Message::system(render_id("system.chat", &v, ov))];
@@ -387,7 +389,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                 let d = need(data)?;
                 let vol = req.volume_id.and_then(|id| d.volumes.iter().find(|x| x.id == id)).ok_or_else(|| not_found("卷"))?;
                 v.insert("volume_title", vol.title.clone());
-                v.insert("existing_block", titled_block("已有的卷纲草稿（在此基础上完善）", &vol.outline, 2000));
+                v.insert("existing_block", titled_block("已有的卷纲草稿（在此基础上完善）", &d.volume_outline_at(vol, None), 2000));
             }
             let json = matches!(task, "ideas" | "characters");
             Ok(prepared(Role::Writer, editor_system(&b.genre, ov), &format!("task.{task}"), &v, json))
@@ -399,8 +401,9 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             let opts = ComposeOpts { current: None, focus_text: "", instruction: &req.instruction, budget: s.context_budget, include_world: true, include_outline: true };
             let mut ctx = render(&compose(d, &opts));
             if let Some(vol) = req.volume_id.and_then(|id| d.volumes.iter().find(|x| x.id == id)) {
-                if !vol.outline.trim().is_empty() {
-                    ctx += &format!("\n\n【本卷卷纲（{}）】\n{}", vol.title, clip(&vol.outline, 3000));
+                let vo = d.volume_outline_at(vol, None);
+                if !vo.trim().is_empty() {
+                    ctx += &format!("\n\n【本卷卷纲（{}）】\n{}", vol.title, clip(&vo, 3000));
                 }
             }
             let tail_start = d.chapters.len().saturating_sub(5);
@@ -438,16 +441,17 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             let d = need(data)?;
             let opts = ComposeOpts { current: None, focus_text: "", instruction: &req.instruction, budget: s.context_budget, include_world: true, include_outline: true };
             let ctx = render(&compose(d, &opts));
-            let mut cast: Vec<&Entry> = d.entries.iter().filter(|e| e.is_major()).take(8).collect();
+            let visible = d.entries_at(None);
+            let mut cast: Vec<&Entry> = visible.iter().copied().filter(|e| e.is_major()).take(8).collect();
             if cast.is_empty() {
-                cast = d.entries.iter().filter(|e| e.kind == "character").take(6).collect();
+                cast = visible.iter().copied().filter(|e| e.kind == "character").take(6).collect();
             }
             if cast.is_empty() {
                 return Err(bad_request("设定库里还没有人物"));
             }
             let ids: HashSet<i64> = cast.iter().map(|e| e.id).collect();
             let people = cast.iter().map(|e| render_entry(e, &d.state_at(e, None))).collect::<Vec<_>>().join("\n");
-            let rels = d.relation_lines(&ids).join("\n");
+            let rels = d.relation_lines(&ids, None).join("\n");
             let mut v = Vars::new();
             v.insert("context", ctx);
             v.insert("characters_block", [titled_block("主要人物", &people, 4000), titled_block("人物关系", &rels, 1500)].join("\n"));
@@ -478,15 +482,15 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                 }
                 "extract" => {
                     let entries = d
-                        .entries
-                        .iter()
+                        .entries_at(Some(c))
+                        .into_iter()
                         .map(|e| {
                             let st = d.state_at(e, Some(c));
                             format!("{}｜{}｜{}", e.name, e.kind_label(), if st.trim().is_empty() { "—".to_string() } else { clip(&st, 120) })
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let threads = d.threads.iter().filter(|t| t.status == "open").map(|t| format!("{}. {}", t.id, t.title)).collect::<Vec<_>>().join("\n");
+                    let threads = d.open_threads(Some(c)).into_iter().map(|t| format!("{}. {}", t.id, t.title)).collect::<Vec<_>>().join("\n");
                     v.insert("entries", if entries.is_empty() { "（暂无）".into() } else { entries });
                     v.insert("threads", if threads.is_empty() { "（暂无）".into() } else { threads });
                 }

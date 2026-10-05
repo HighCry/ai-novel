@@ -9,6 +9,7 @@ pub mod libapi;
 pub mod library;
 pub mod lint;
 pub mod llm;
+pub mod logic;
 pub mod memory;
 pub mod models;
 pub mod prompts;
@@ -17,6 +18,7 @@ pub mod skills;
 pub mod state;
 pub mod stylelib;
 pub mod text;
+pub mod visibility;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, StatusCode, Uri};
@@ -66,6 +68,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/threads/{id}", patch(patch_thread).delete(delete_thread))
         .route("/books/{id}/apply_updates", post(apply_updates))
         .route("/books/{id}/context", get(context_preview))
+        .route("/books/{id}/visibility", get(get_visibility).post(set_visibility))
         .route("/lint", post(lint))
         .route("/tools/normalize", post(normalize_text))
         .route("/ai/stream", post(ai::stream))

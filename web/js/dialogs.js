@@ -228,6 +228,24 @@ export function openBookSettings() {
     const btn = h('button', { class: 'btn', onclick: () => streamInto(target, { task, book_id: b.id, fields: fields() }, btn) }, label);
     return btn;
   };
+  // 分节可见性直接改库里的原文，先存下这里没保存的修改，免得回来点「保存」把标记覆盖掉
+  const visBtn = () => h('button', {
+    class: 'btn',
+    title: '按标题分节，设置写到第几卷、第几章时才给 AI 看',
+    onclick: async () => {
+      try {
+        store.book = await api.patch(`/books/${b.id}`, b);
+      } catch (err) {
+        return toast(err.message, 'error');
+      }
+      openVisibility((book) => {
+        b.worldview = book.worldview;
+        b.outline = book.outline;
+        world.value = book.worldview;
+        outline.value = book.outline;
+      });
+    },
+  }, '分节可见性');
   const pages = {
     basic: h('div', null,
       h('div', { class: 'grid2' },
@@ -238,8 +256,8 @@ export function openBookSettings() {
         field('单章目标字数', h('input', { type: 'number', min: 500, step: 100, value: b.target_words, oninput: (e) => { b.target_words = Number(e.target.value); } }), '写整章时的默认长度')),
       field('一句话梗概', text('logline', 2, '主角是谁、想要什么、最大的阻碍')),
       field('作品简介', h('div', null, synopsis, genBtn('AI 写 3 版简介', 'synopsis', synopsis)))),
-    world: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成世界观', 'world', world), h('span', { class: 'hint' }, '世界观会注入每次写作的上下文')), world),
-    outline: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成总纲', 'outline', outline), h('span', { class: 'hint' }, '总纲决定全书走向')), outline),
+    world: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成世界观', 'world', world), visBtn(), h('span', { class: 'hint' }, '世界观会注入写作的上下文；后期的真相、高阶境界可以按标题分节，到对应的卷再给 AI')), world),
+    outline: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成总纲', 'outline', outline), visBtn(), h('span', { class: 'hint' }, '总纲决定全书走向；写正文时只给到当前卷，结局只给规划用')), outline),
     style: (() => {
       const guide = text('style_guide', 6, '比如：第三人称限知视角；语言简洁口语化，少用成语；对话占一半以上；每章至少一个爽点。');
       const sample = text('style_sample', 12, '贴一段你自己写得满意的文字（或你想要的风格），AI 会模仿它的句式和节奏。');
@@ -1265,26 +1283,100 @@ export function openPalette() {
   input.focus();
 }
 
+// ---------------- 可见性 ----------------
+
+const GATE_MODES = [['public', '公开'], ['vol', '从第 N 卷起'], ['ch', '从第 N 章起'], ['planning', '仅规划（写正文时不给）'], ['hidden', '对 AI 隐藏']];
+
+function gateParts(v) {
+  const m = /^第(\d+)([卷章])起$/.exec(v || '');
+  if (m) return [m[2] === '卷' ? 'vol' : 'ch', Number(m[1])];
+  return [{ 仅规划: 'planning', 对AI隐藏: 'hidden' }[v] || 'public', 1];
+}
+
+const gateText = (mode, n) => ({ public: '公开', vol: `第${n}卷起`, ch: `第${n}章起`, planning: '仅规划', hidden: '对AI隐藏' })[mode];
+
+/** 可见性选择：onChange 收到「公开」「第2卷起」这样的写法；给了 auto 时多一个「自动」选项，对应空字符串。 */
+function gatePicker(value, onChange, { auto = null } = {}) {
+  let [mode, n] = value ? gateParts(value) : [auto ? 'auto' : 'public', 1];
+  const num = h('input', { type: 'number', min: 1, value: n, class: 'gate-num' });
+  const emitValue = () => onChange(mode === 'auto' ? '' : gateText(mode, n));
+  const sync = () => { num.hidden = mode !== 'vol' && mode !== 'ch'; };
+  num.onchange = () => { n = Math.max(1, Number(num.value) || 1); num.value = n; emitValue(); };
+  const options = auto ? [['auto', `自动（${auto}）`], ...GATE_MODES] : GATE_MODES;
+  const sel = select(options, mode, (v) => { mode = v; sync(); emitValue(); });
+  sync();
+  return h('span', { class: 'gate-picker' }, sel, num);
+}
+
+/** 世界观、总纲、卷纲按标题分节设置可见性。onDone 在改过之后收到最新的作品。 */
+export async function openVisibility(onDone) {
+  const bid = store.book.id;
+  let data = await api.get(`/books/${bid}/visibility`);
+  let changed = false;
+  const body = h('div', { class: 'vis-view' });
+  const change = async (field, volumeId, index, visibility) => {
+    try {
+      data = await api.post(`/books/${bid}/visibility`, { field, volume_id: volumeId ?? null, index, visibility });
+      changed = true;
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    draw();
+  };
+  const group = (label, field, parts, volumeId) => h('details', { open: parts.length > 0 },
+    h('summary', null, parts.length ? label : `${label}（没有内容）`),
+    parts.map((p) => h('div', { class: 'vis-row', style: `padding-left:${Math.max(0, p.level - 1) * 14}px` },
+      h('span', { class: 'vis-title' }, p.title, h('span', { class: 'muted small' }, `　${p.chars} 字`)),
+      p.parent ? h('span', { class: 'hint' }, `受上级「${p.parent}」限制`) : null,
+      p.level === 0 ? h('span', { class: 'muted small' }, '公开（开头没有标题，跟着全文走）') : gatePicker(p.marked || '', (v) => change(field, volumeId, p.index, v), { auto: p.auto }))));
+  const draw = () => {
+    body.innerHTML = '';
+    body.append(h('p', { class: 'hint' }, '写某一章时，还没开放的节不会发给 AI；「仅规划」只在规划章纲、起名、推演时给；「对 AI 隐藏」任何时候都不给。没设置时按标题推断：含「第N卷」的从第 N 卷起开放，含「结局」「终局」「核心主线」「真相」「底牌」「幕后」的仅规划。设置会写成标题末尾的标记，比如「### 第二卷〔第2卷起〕」，上级标题不开放时下面的小节也不给。'));
+    if (!data.uses_volumes) body.append(h('p', { class: 'hint warn-text' }, '本书还没有分卷：按标题推断的「第N卷」暂时当公开处理；手动设成「第N卷起」的，要等章节分进对应的卷才会开放。'));
+    body.append(group('世界观', 'worldview', data.worldview), group('总纲', 'outline', data.outline), ...data.volumes.map((v) => group(`卷纲 · ${v.title}`, 'volume', v.parts, v.id)));
+  };
+  draw();
+  modal({
+    title: '分节可见性：写到哪一章时 AI 才能看到',
+    wide: 'xl',
+    body,
+    actions: [{ label: '完成', class: 'primary', onClick: (c) => c() }],
+    onClose: async () => {
+      if (!changed) return;
+      store.book = await api.get(`/books/${bid}`);
+      await reload(['volumes']);
+      emit('book-changed');
+      onDone?.(store.book);
+    },
+  });
+}
+
 // ---------------- 上下文预览 ----------------
 
 export async function openContext() {
   const ch = store.chapter;
   await store.editor?.save().catch(() => {});
   const r = await api.get(`/books/${store.book.id}/context${ch ? `?chapter_id=${ch.id}` : ''}`);
+  const w = r.withheld || { worldview: [], outline: [], entries: [] };
+  const hidden = w.worldview.length + w.outline.length + w.entries.length;
+  const line = (label, items) => (items.length ? h('div', { class: 'small' }, h('b', null, `${label}：`), items.join('、')) : null);
   modal({
     title: `AI 写作时看到的上下文 · ${r.chars} 字（预算 ${r.budget} 字）`,
     wide: 'xl',
     body: h('div', { class: 'context-view' },
       h('p', { class: 'hint' }, '除了这些，生成时还会带上本章章纲、光标前的正文和你的补充要求。内容太多会被截断，可以在设置里调整预算。'),
+      hidden ? h('details', null, h('summary', null, `${ch ? '这一章' : '规划时'}没给 AI 看的内容（${hidden} 项）`),
+        h('p', { class: 'hint' }, '按可见性挡掉的：还没到开放章节的、仅规划的、对 AI 隐藏的。设定的作者底牌任何时候都不给，不在这里列出。'),
+        line('世界观', w.worldview), line('总纲', w.outline), line('设定', w.entries.map((e) => `${e.name}（${e.visibility}）`))) : null,
       r.sections.map((s, i) => h('details', { open: i < 3 }, h('summary', null, `${s.title}（${s.body.length} 字）`), h('pre', null, s.body)))),
-    actions: [{ label: '关闭', onClick: (c) => c() }],
+    actions: [{ label: '分节可见性…', class: 'left', onClick: (c) => { c(); openVisibility(); } }, { label: '关闭', onClick: (c) => c() }],
   });
 }
 
 // ---------------- 设定条目 ----------------
 
 export function openEntry(entry) {
-  const e = { kind: 'character', name: '', aliases: '', description: '', state: '', immutable: '', always_include: false, role: '', ...entry };
+  const e = { kind: 'character', name: '', aliases: '', description: '', state: '', immutable: '', always_include: false, role: '', visibility: '', secret: '', ...entry };
   e.fields = { ...(entry.fields || {}) };
   const isNew = !e.id;
   const save = async (close) => {
@@ -1352,8 +1444,11 @@ export function openEntry(entry) {
           field('名称', h('input', { value: e.name, oninput: (ev) => { e.name = ev.target.value; } })),
           field('定位', select([['', '（不设置）'], ...ROLES.map((r) => [r, r])], e.role, (v) => { e.role = v; }), '主角、重要配角、反派会做缺席检查')),
         field('别名 / 称呼', h('input', { value: e.aliases, placeholder: '用顿号分隔，比如：凡哥、林少', oninput: (ev) => { e.aliases = ev.target.value; } }), '正文、章纲里出现名称或别名时，这条设定会自动带进 AI 的上下文'),
-        field('设定描述', h('textarea', { rows: 4, value: e.description, oninput: (ev) => { e.description = ev.target.value; } })),
+        field('设定描述', h('textarea', { rows: 4, value: e.description, oninput: (ev) => { e.description = ev.target.value; } }), '只写读者现在能知道的；后期才揭晓的写进下面的「作者底牌」'),
         field('不可改变的特征', h('input', { value: e.immutable, placeholder: '写崩就会被读者骂的东西：性格底线、身世、口头禅', oninput: (ev) => { e.immutable = ev.target.value; } })),
+        h('div', { class: 'grid2' },
+          field('可见性', gatePicker(e.visibility, (v) => { e.visibility = v; }), '后期才登场或揭晓的设定设成「从第 N 卷起」，写前面的章节时 AI 看不到它，体检也会查出提前写出来的地方'),
+          field('作者底牌', h('textarea', { rows: 2, value: e.secret, placeholder: '真实身份、后期反转……', oninput: (ev) => { e.secret = ev.target.value; } }), '只给你自己看，任何时候都不发给 AI')),
         stateBox,
         history,
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: e.always_include, onchange: (ev) => { e.always_include = ev.target.checked; } }), '常驻：每次写作都带上（适合主角、核心体系）'));

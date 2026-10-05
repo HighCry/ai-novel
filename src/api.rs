@@ -411,12 +411,20 @@ fn sync_state_text(e: &mut Entry) {
     }
 }
 
+/// 可见性按统一写法存，写法看不懂时直接报错，免得存进去被当成对 AI 隐藏。
+fn normalize_visibility(e: &mut Entry) -> Result<(), AppError> {
+    e.visibility = crate::visibility::normalize(&e.visibility)
+        .ok_or_else(|| bad_request(format!("可见性「{}」看不懂，可以写：公开、第2卷起、第91章起、仅规划、对AI隐藏", e.visibility.trim())))?;
+    Ok(())
+}
+
 pub async fn create_entry(State(st): State<AppState>, Path(book_id): Path<i64>, Json(mut e): Json<Entry>) -> ApiResult<Entry> {
     require_book(&st.db, book_id)?;
     if e.name.trim().is_empty() {
         return Err(bad_request("名称不能为空"));
     }
     e.book_id = book_id;
+    normalize_visibility(&mut e)?;
     sync_state_text(&mut e);
     let created = st.db.create_entry(&e)?;
     if !created.state.trim().is_empty() {
@@ -429,6 +437,7 @@ pub async fn create_entry(State(st): State<AppState>, Path(book_id): Path<i64>, 
 pub async fn patch_entry(State(st): State<AppState>, Path(id): Path<i64>, Json(p): Json<Value>) -> ApiResult<Entry> {
     let e = st.db.get_entry(id)?.ok_or_else(|| not_found("设定"))?;
     let mut updated: Entry = apply_patch(&e, &p, &["id", "book_id", "updated_at"])?;
+    normalize_visibility(&mut updated)?;
     sync_state_text(&mut updated);
     st.db.update_entry(&updated)?;
     if updated.state != e.state || updated.fields != e.fields {
@@ -732,7 +741,68 @@ pub async fn context_preview(State(st): State<AppState>, Path(book_id): Path<i64
     };
     let sections = memory::compose(&data, &opts);
     let text = memory::render(&sections);
-    Ok(Json(json!({ "sections": sections, "chars": text.chars().count(), "budget": settings.context_budget })))
+    let at = data.at(current);
+    let withheld = json!({
+        "worldview": crate::visibility::withheld(&data.book.worldview, at, data.uses_volumes()),
+        "outline": crate::visibility::withheld(&data.book.outline, at, data.uses_volumes()),
+        "entries": data.entries.iter().filter(|e| !e.gate().open_at(at)).map(|e| json!({ "id": e.id, "name": e.name, "visibility": e.gate() })).collect::<Vec<_>>(),
+    });
+    Ok(Json(json!({ "sections": sections, "chars": text.chars().count(), "budget": settings.context_budget, "withheld": withheld })))
+}
+
+// ---------- 分节可见性 ----------
+
+pub async fn get_visibility(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Value> {
+    use crate::visibility::describe;
+    let book = require_book(&st.db, book_id)?;
+    let volumes = st.db.list_volumes(book_id)?;
+    let uses = !volumes.is_empty();
+    Ok(Json(json!({
+        "uses_volumes": uses,
+        "worldview": describe(&book.worldview, uses),
+        "outline": describe(&book.outline, uses),
+        "volumes": volumes.iter().map(|v| json!({ "id": v.id, "title": v.title, "parts": describe(&v.outline, false) })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SetVisibility {
+    /// worldview / outline / volume
+    pub field: String,
+    #[serde(default)]
+    pub volume_id: Option<i64>,
+    pub index: usize,
+    /// 空字符串表示去掉标记、按标题推断
+    #[serde(default)]
+    pub visibility: String,
+}
+
+/// 改世界观、总纲或卷纲里某一节标题末尾的可见性标记。
+pub async fn set_visibility(State(st): State<AppState>, Path(book_id): Path<i64>, Json(r): Json<SetVisibility>) -> ApiResult<Value> {
+    use crate::visibility::{set_marker, Gate};
+    let gate = match r.visibility.trim() {
+        "" => None,
+        s => Some(Gate::parse(s).ok_or_else(|| bad_request(format!("可见性「{s}」看不懂，可以写：公开、第2卷起、第91章起、仅规划、对AI隐藏")))?),
+    };
+    let missing = || bad_request("没有这一节，可能刚改过原文，请刷新后再试");
+    match r.field.as_str() {
+        "worldview" | "outline" => {
+            let mut book = require_book(&st.db, book_id)?;
+            let text = if r.field == "worldview" { &mut book.worldview } else { &mut book.outline };
+            *text = set_marker(text, r.index, gate).ok_or_else(missing)?;
+            st.db.update_book(&book)?;
+        }
+        "volume" => {
+            let mut v = match r.volume_id {
+                Some(id) => st.db.get_volume(id)?.filter(|v| v.book_id == book_id).ok_or_else(|| not_found("卷"))?,
+                None => return Err(bad_request("缺少 volume_id")),
+            };
+            v.outline = set_marker(&v.outline, r.index, gate).ok_or_else(missing)?;
+            st.db.update_volume(&v)?;
+        }
+        _ => return Err(bad_request("field 只能是 worldview、outline 或 volume")),
+    }
+    get_visibility(State(st), Path(book_id)).await
 }
 
 pub async fn normalize_text(Json(v): Json<Value>) -> Json<Value> {

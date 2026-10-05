@@ -136,6 +136,10 @@ pub struct Entry {
     /// 人物的结构化状态（最新），键见 CHAR_FIELDS
     pub fields: BTreeMap<String, String>,
     pub updated_at: i64,
+    /// 什么时候可以给模型看：空为公开，或「第2卷起」「第91章起」「仅规划」「对AI隐藏」
+    pub visibility: String,
+    /// 作者底牌：真实身份、后期反转这类读者暂时不能知道的设定，任何任务都不发给模型
+    pub secret: String,
 }
 
 /// 设定在某一章的状态快照。phase = start 表示从这一章开始生效（手动修改），
@@ -186,6 +190,11 @@ impl Entry {
 
     pub fn kind_label(&self) -> &'static str {
         kind_label(&self.kind)
+    }
+
+    /// 写法不认识的可见性按对 AI 隐藏处理，宁可少给也不泄露。
+    pub fn gate(&self) -> crate::visibility::Gate {
+        crate::visibility::Gate::parse(&self.visibility).unwrap_or(crate::visibility::Gate::Hidden)
     }
 }
 
