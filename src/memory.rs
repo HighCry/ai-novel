@@ -485,11 +485,12 @@ pub fn match_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>, scan: &st
     let mut hits: Vec<(&Entry, usize)> = entries
         .into_iter()
         .filter_map(|e| {
+            let text = e.scan_text(scan);
             let n: usize = e
                 .keywords()
                 .iter()
                 .filter(|k| k.chars().count() >= 2 || **k == e.name.trim())
-                .map(|k| scan.matches(k.as_str()).count())
+                .map(|k| text.matches(k.as_str()).count())
                 .sum();
             (e.always_include || n > 0).then_some((e, n))
         })
@@ -736,6 +737,16 @@ mod tests {
         ];
         let threads = vec![Thread { id: 1, title: "黑色玉佩的来历".into(), status: "open".into(), planted_chapter_id: Some(1), ..Default::default() }];
         BookData::new(book, vec![], chapters, entries, threads, vec![])
+    }
+
+    #[test]
+    fn excluded_phrases_do_not_count_as_mentions() {
+        let ping = Entry { id: 1, name: "平安".into(), kind: "character".into(), exclude: "平平安安、平安无事".into(), ..Default::default() };
+        let other = Entry { id: 2, name: "陈渊".into(), kind: "character".into(), ..Default::default() };
+        let names = |text: &str| match_entries([&ping, &other], text).into_iter().map(|e| e.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names("陈渊盼着平平安安回家，一路平安无事。"), vec!["陈渊"]);
+        assert_eq!(names("平安背着陈渊往外跑，求个平平安安。"), vec!["平安", "陈渊"]);
+        assert_eq!(ping.scan_text("平平安安").len(), "平平安安".len(), "盖掉后字节长度不变");
     }
 
     #[test]

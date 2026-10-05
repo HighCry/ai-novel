@@ -53,9 +53,12 @@ const PRESETS = [
 
 const PLATFORMS = [['fanqie', '番茄小说'], ['qidian', '起点中文网'], ['', '其他']];
 const TASK_NAMES = {
-  continue: '续写', write_chapter: '写整章', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', free: '问编辑',
+  continue: '续写', write_chapter: '写整章', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', proofread: '校对', free: '问编辑',
+  ghost: '灰字续写', insert: '斜杠指令', names: '起名', beats: '节拍规划', deslop: '去 AI 味', simulate: '人物推演',
   chat: '角色对话', world: '世界观', outline: '总纲', synopsis: '简介', volume_outline: '卷纲', ideas: '开书方案', characters: '人物设计',
   chapter_outlines: '章纲规划', summarize: '摘要', extract: '提取设定', check: '一致性检查', review: '审稿', volume_summary: '卷摘要',
+  reveal_plan: '揭示计划', tension: '张力分析', first_read: '冷读者反馈', revision_plan: '修订计划', style_profile: '文风提取',
+  library_analyze: '范文分析', style_distill: '提炼文风指南',
 };
 
 const select = (options, value, onchange) => h('select', { onchange: (e) => onchange(e.target.value) },
@@ -72,6 +75,10 @@ export function openSettings() {
   s.embedding = s.embedding || { provider_id: '', model: '' };
   s.library_refs = s.library_refs ?? 2;
   s.use_style_guide = s.use_style_guide ?? true;
+  s.backup_keep = s.backup_keep ?? 14;
+  s.backup_mirror = s.backup_mirror || '';
+  s.sensitive_words = s.sensitive_words || [];
+  s.sensitive_ignore = s.sensitive_ignore || [];
   const prefs = { ghostAuto: localStorage.getItem('ghostAuto') || '0', ghostDelay: localStorage.getItem('ghostDelay') || '2500', ghostWords: localStorage.getItem('ghostWords') || '50' };
   const models = new Set();
   const datalist = h('datalist', { id: 'model-options' });
@@ -154,6 +161,70 @@ export function openSettings() {
   }, '＋ 添加接口');
 
   const cliches = h('textarea', { rows: 3, value: s.extra_cliches.join('\n'), placeholder: '一行一个，比如你自己容易写多的口头禅' });
+  const lines = (text) => text.split('\n').map((x) => x.trim()).filter(Boolean);
+  const sensitiveWords = h('textarea', { rows: 3, value: s.sensitive_words.join('\n'), placeholder: '一行一个；写成「词=改法」可以带上改法，比如：禁药=违禁丹药' });
+  const sensitiveIgnore = h('textarea', { rows: 3, value: s.sensitive_ignore.join('\n'), placeholder: '一行一个：内置词库里这本书确实要用、不想再被提示的词' });
+  const importLexicon = h('button', {
+    class: 'mini',
+    onclick: async () => {
+      const file = await pickFile('.txt,text/plain');
+      if (!file) return;
+      const words = lines((await file.text()).replace(/\r/g, ''));
+      const merged = [...new Set([...lines(sensitiveWords.value), ...words])];
+      sensitiveWords.value = merged.join('\n');
+      toast(`导入了 ${words.length} 个词，现在一共 ${merged.length} 个，保存后生效`);
+    },
+  }, '导入词库文件…');
+
+  const BACKUP_KIND = { auto: '自动', manual: '手动', 'before-restore': '还原前' };
+  const backupList = h('div', { class: 'backup-list' }, h('div', { class: 'muted' }, '读取备份列表…'));
+  async function loadBackups() {
+    try {
+      const r = await api.get('/backups');
+      backupList.innerHTML = '';
+      backupList.append(h('p', { class: 'hint' }, r.dir ? `存放位置：${r.dir}` : '当前是内存数据库，不能备份。', r.last_auto ? `　上次自动备份：${fmtTime(r.last_auto)}` : ''));
+      if (!r.files.length) backupList.append(h('div', { class: 'empty' }, '还没有备份。'));
+      for (const f of r.files) {
+        backupList.append(h('div', { class: 'row' },
+          h('span', { class: 'tag' }, BACKUP_KIND[f.kind] || f.kind),
+          h('span', { class: 'grow' }, fmtTime(f.created_at)),
+          h('span', { class: 'muted' }, `${(f.bytes / 1048576).toFixed(1)} MB`),
+          h('button', { class: 'mini', onclick: () => restoreBackup(f) }, '还原'),
+          h('button', { class: 'mini danger', onclick: () => deleteBackup(f) }, '删除')));
+      }
+    } catch (e) {
+      backupList.innerHTML = '';
+      backupList.append(h('div', { class: 'err' }, e.message));
+    }
+  }
+  async function restoreBackup(f) {
+    if (!(await confirmBox(`把所有作品、设定和设置还原到 ${fmtTime(f.created_at)} 的样子？当前的数据会先另存一份「还原前」备份。桌面版和手机同时开着时，先关掉另一边。`, { okText: '还原', danger: true }))) return;
+    try {
+      const r = await api.post(`/backups/${encodeURIComponent(f.name)}/restore`);
+      toast(`已还原，原来的数据另存为 ${r.safety}，马上刷新`);
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  async function deleteBackup(f) {
+    if (!(await confirmBox(`删除 ${fmtTime(f.created_at)} 的这份备份？`, { okText: '删除', danger: true }))) return;
+    try {
+      await api.del(`/backups/${encodeURIComponent(f.name)}`);
+      loadBackups();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  const backupNow = h('button', {
+    class: 'btn',
+    onclick: () => busy(backupNow, async () => {
+      const r = await api.post('/backups');
+      toast(r.mirror_error ? `已备份，但${r.mirror_error}` : '已备份', r.mirror_error ? 'warn' : 'info');
+      loadBackups();
+    }, '备份中…'),
+  }, '立即备份');
+
   const body = h('div', { class: 'settings' },
     h('h4', null, '模型接口'),
     h('p', { class: 'hint' }, '支持所有 OpenAI 兼容接口。密钥只保存在本机的数据库里。'),
@@ -169,6 +240,10 @@ export function openSettings() {
       field('单章最多字数', h('input', { type: 'number', min: 0, step: 100, value: s.max_chapter_words, oninput: (e) => { s.max_chapter_words = Number(e.target.value); } })),
       field('JSON 模式', h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s.json_mode, onchange: (e) => { s.json_mode = e.target.checked; } }), '接口支持 response_format 时开启'))),
     field('自定义禁用词', cliches, '文字质量检查时会额外标出这些词'),
+    h('div', { class: 'grid2' },
+      field('追加敏感词', h('div', null, sensitiveWords, h('div', { class: 'row' }, importLexicon, h('span', { class: 'hint' }, 'txt 文件，一行一个词，UTF-8 编码'))),
+        '内置词库已经包含常见的涉政、色情、血腥、毒品、引流广告等词；文字检查和投稿检查都会标出来'),
+      field('不再提示的敏感词', sensitiveIgnore, '结果只是风险提示，以平台审核为准')),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!s.stream_usage, onchange: (e) => { s.stream_usage = e.target.checked; } }), '流式输出时请求真实 token 用量（OpenAI、DeepSeek 等支持；接口报错就关掉，改用字数估算）'),
     h('h4', null, '文风库'),
     h('p', { class: 'hint' }, '写正文时（续写、写整章、润色、灰字、斜杠指令）自动带上文风指南，并从文风库里按场景检索几段范文给 AI 参考。'),
@@ -186,10 +261,18 @@ export function openSettings() {
     h('h4', null, '提示词'),
     h('div', { class: 'row' },
       h('button', { class: 'btn', onclick: () => openPrompts() }, '编辑提示词模板…'),
-      h('span', { class: 'hint' }, '所有 AI 任务的提示词都能改，改坏了可以一键恢复默认。')));
+      h('span', { class: 'hint' }, '所有 AI 任务的提示词都能改，改坏了可以一键恢复默认。')),
+    h('h4', null, '数据备份'),
+    h('p', { class: 'hint' }, '每天第一次打开时自动给整个数据库拍一份快照（所有作品、设定、文风库和设置），只保留最近几份；还原前会先把当前数据另存一份。'),
+    h('div', { class: 'grid2' },
+      field('自动备份保留', h('input', { type: 'number', min: 1, max: 365, value: s.backup_keep, oninput: (e) => { s.backup_keep = Math.max(1, Number(e.target.value) || 14); } }), '份'),
+      field('同步到文件夹（可选）', h('input', { value: s.backup_mirror, placeholder: '比如 D:\\OneDrive\\小说备份', oninput: (e) => { s.backup_mirror = e.target.value.trim(); } }), '每次备份后再复制一份过去；放进网盘同步目录就等于云端备份')),
+    h('div', { class: 'row' }, backupNow),
+    backupList);
 
   renderProviders();
   renderRoles();
+  loadBackups();
   modal({
     title: '设置',
     body,
@@ -200,7 +283,9 @@ export function openSettings() {
         label: '保存',
         class: 'primary',
         onClick: async (close) => {
-          s.extra_cliches = cliches.value.split('\n').map((x) => x.trim()).filter(Boolean);
+          s.extra_cliches = lines(cliches.value);
+          s.sensitive_words = lines(sensitiveWords.value);
+          s.sensitive_ignore = lines(sensitiveIgnore.value);
           Object.entries(prefs).forEach(([k, v]) => localStorage.setItem(k, v));
           try {
             store.settings = await api.put('/settings', s);
@@ -255,6 +340,9 @@ export function openBookSettings() {
       h('div', { class: 'grid2' },
         field('目标平台', select(PLATFORMS, b.platform, (v) => { b.platform = v; })),
         field('单章目标字数', h('input', { type: 'number', min: 500, step: 100, value: b.target_words, oninput: (e) => { b.target_words = Number(e.target.value); } }), '写整章时的默认长度')),
+      h('div', { class: 'grid2' },
+        field('金手指', h('input', { value: b.golden_finger || '', placeholder: '名字和别名，顿号分隔，比如：太虚梦潮、梦潮', oninput: (e) => { b.golden_finger = e.target.value; } }), '开篇体检会查它在第1章第几字亮出来'),
+        field('每天更新字数', h('input', { type: 'number', min: 0, step: 500, value: b.update_target || 0, oninput: (e) => { b.update_target = Math.max(0, Number(e.target.value) || 0); } }), '用来算存稿还够更几天；0 表示不算')),
       field('一句话梗概', text('logline', 2, '主角是谁、想要什么、最大的阻碍')),
       field('作品简介', h('div', null, synopsis, genBtn('AI 写 3 版简介', 'synopsis', synopsis)))),
     world: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成世界观', 'world', world), visBtn(), h('span', { class: 'hint' }, '世界观会注入写作的上下文；后期的真相、高阶境界可以按标题分节，到对应的卷再给 AI')), world),
@@ -485,9 +573,14 @@ export async function openStats() {
     body: h('div', { class: 'stats' },
       h('div', { class: 'stats-grid four' },
         card('总字数', fmtWords(s.words)),
-        card('章节', s.chapters, `已定稿 ${s.done} 章`),
+        card('章节', s.chapters, `已定稿 ${s.done} 章 · 已发布 ${s.published} 章`),
         card('近 30 天日均', Math.round(total30 / 30), `共 ${fmtWords(total30)} 字`),
         card('采纳的 AI 字数', fmtWords(s.ai_chars), `约占正文 ${(s.ai_ratio * 100).toFixed(1)}%`)),
+      h('div', { class: 'stats-grid four' },
+        card('存稿', `${s.drafts.chapters} 章`, `${fmtWords(s.drafts.words)} 字`),
+        card('还能更', s.drafts.days == null ? '—' : `${s.drafts.days} 天`,
+          s.drafts.update_target ? `按每天 ${fmtWords(s.drafts.update_target)} 字` : '在「作品设定 → 基本信息」填每天更新字数')),
+      h('p', { class: 'hint' }, '目录里每章右侧的「发」把这一章和前面的章节标成已发布，「撤」取消；有正文、还没发布的章节算存稿。'),
       h('h4', null, '近 30 天码字'),
       h('div', { class: 'day-chart' }, days.map(([day, w]) => h('div', { class: 'day-col', title: `${day}：${w} 字` }, h('div', { class: 'day-bar', style: { height: (w / max) * 100 + '%' } })))),
       h('h4', null, '张力曲线'),
@@ -506,7 +599,8 @@ export async function openStats() {
       h('p', { class: 'small' },
         `累计 token：输入 ${fmtWords(s.tokens.prompt)}，输出 ${fmtWords(s.tokens.completion)}${s.tokens.estimated ? '（部分按字数估算）' : ''}`,
         s.cost > 0 ? ` · 费用约 ¥${s.cost}` : ' · 在设置里填写模型单价后可以计算费用'),
-      h('p', { class: 'hint' }, '番茄小说要求作者如实勾选 AI 使用情况，起点反对用 AI 替代真人完成核心创作。下面记录了每次调用 AI 的情况，以及你把 AI 生成内容放进正文时的字数（按采纳那一刻统计，之后的修改不计入），可以作为如实声明的依据。'),
+      h('p', { class: 'hint' }, '番茄小说要求作者如实勾选 AI 使用情况，起点反对用 AI 替代真人完成核心创作。下面记录了每次调用 AI 的情况，以及你把 AI 生成内容放进正文时的字数（按采纳那一刻统计，之后的修改不计入），可以作为如实声明的依据。',
+        h('a', { href: '#', onclick: (e) => { e.preventDefault(); openDeclaration(); } }, '生成 AI 使用声明')),
       s.ai_usage.length
         ? h('table', { class: 'table' },
           h('tr', null, h('th', null, '用途'), h('th', null, '次数'), h('th', null, '发送字数'), h('th', null, '生成字数')),
@@ -521,6 +615,54 @@ export async function openStats() {
             h('td', null, c.words ? Math.min(100, (c.ai_chars / c.words) * 100).toFixed(0) + '%' : '—'))))
         : null),
     actions: [{ label: '关闭', onClick: (c) => c() }],
+  });
+}
+
+// ---------------- AI 使用声明 ----------------
+
+export async function openDeclaration() {
+  let d;
+  try { d = await api.get(`/books/${store.book.id}/declaration`); } catch (e) { return toast(e.message, 'error'); }
+  const text = h('textarea', { rows: 12 });
+  text.value = d.text;
+  const pct = (r) => (r * 100).toFixed(r < 0.1 ? 1 : 0) + '%';
+  const over = d.chapters.filter((c) => c.ratio > d.red_line);
+  modal({
+    title: 'AI 使用声明',
+    wide: true,
+    body: h('div', { class: 'stats' },
+      h('p', { class: 'hint' }, '番茄上传章节时要如实勾选是否用了 AI；起点会处理正文 AI 生成占比超过 10% 的作品。下面按本软件里的使用记录生成，可以先改再复制；在别的地方用过 AI 请自己补上。'),
+      text,
+      h('h4', null, '按用途'),
+      d.usage.length
+        ? h('table', { class: 'table' },
+          h('tr', null, h('th', null, '用途'), h('th', null, '次数'), h('th', null, '包括')),
+          d.usage.map((u) => h('tr', null, h('td', null, u.category), h('td', null, u.count), h('td', { class: 'small' }, u.tasks.map((t) => TASK_NAMES[t] || t).join('、')))))
+        : h('div', { class: 'empty' }, '还没有调用过 AI'),
+      h('h4', null, '正文里有 AI 文字的章节'),
+      d.chapters.length
+        ? h('table', { class: 'table' },
+          h('tr', null, h('th', null, '章节'), h('th', null, '正文字数'), h('th', null, 'AI 字数'), h('th', null, '占比'), h('th', null, '状态')),
+          d.chapters.map((c) => h('tr', { class: c.ratio > d.red_line ? 'warn-text' : '' },
+            h('td', null, c.label), h('td', null, c.words), h('td', null, c.ai_chars), h('td', null, pct(c.ratio)), h('td', null, c.published ? '已发布' : '存稿'))))
+        : h('div', { class: 'empty' }, '正文里没有采用 AI 生成的文字'),
+      over.length ? h('p', { class: 'warn-text small' }, `${over.length} 章采用的 AI 文字超过 10%（标黄的行），发布前请对照平台规定。`) : null,
+      h('p', { class: 'hint' }, 'AI 字数按放进正文那一刻统计，之后自己改写、删掉的部分没有扣除，所以是上限。「导出创作过程记录」会导出大纲、各章的修改历史、每天的码字和 AI 使用情况，平台质疑时可以用来说明创作由你主导。')),
+    actions: [
+      {
+        label: '导出创作过程记录',
+        onClick: async () => {
+          try {
+            const r = await api.get(`/books/${store.book.id}/creation_log`);
+            download(new Blob([r.markdown], { type: 'text/markdown;charset=utf-8' }), r.filename);
+          } catch (e) {
+            toast(e.message, 'error');
+          }
+        },
+      },
+      { label: '复制声明', class: 'primary', onClick: () => copyText(text.value) },
+      { label: '关闭', onClick: (c) => c() },
+    ],
   });
 }
 
@@ -1452,7 +1594,9 @@ export function openEntry(entry) {
           field('类别', select(Object.entries(KIND), e.kind, (v) => { e.kind = v; drawState(); })),
           field('名称', h('input', { value: e.name, oninput: (ev) => { e.name = ev.target.value; } })),
           field('定位', select([['', '（不设置）'], ...ROLES.map((r) => [r, r])], e.role, (v) => { e.role = v; }), '主角、重要配角、反派会做缺席检查')),
-        field('别名 / 称呼', h('input', { value: e.aliases, placeholder: '用顿号分隔，比如：凡哥、林少', oninput: (ev) => { e.aliases = ev.target.value; } }), '正文、章纲里出现名称或别名时，这条设定会自动带进 AI 的上下文'),
+        h('div', { class: 'grid2' },
+          field('别名 / 称呼', h('input', { value: e.aliases, placeholder: '用顿号分隔，比如：凡哥、林少', oninput: (ev) => { e.aliases = ev.target.value; } }), '正文、章纲里出现名称或别名时，这条设定会自动带进 AI 的上下文'),
+          field('排除短语', h('input', { value: e.exclude || '', placeholder: '用顿号分隔，比如：平平安安、平安无事', oninput: (ev) => { e.exclude = ev.target.value; } }), '名字落在这些短语里不算提到：不带进上下文、不高亮、体检不算出场')),
         field('设定描述', h('textarea', { rows: 4, value: e.description, oninput: (ev) => { e.description = ev.target.value; } }), '只写读者现在能知道的；后期才揭晓的写进下面的「作者底牌」'),
         field('不可改变的特征', h('input', { value: e.immutable, placeholder: '写崩就会被读者骂的东西：性格底线、身世、口头禅', oninput: (ev) => { e.immutable = ev.target.value; } })),
         h('div', { class: 'grid2' },

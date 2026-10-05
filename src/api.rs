@@ -109,7 +109,7 @@ pub async fn delete_relation(State(st): State<AppState>, Path(id): Path<i64>) ->
     ok()
 }
 
-fn require_book(db: &Db, id: i64) -> Result<Book, AppError> {
+pub(crate) fn require_book(db: &Db, id: i64) -> Result<Book, AppError> {
     db.get_book(id)?.ok_or_else(|| not_found("作品"))
 }
 
@@ -210,8 +210,10 @@ pub async fn delete_book(State(st): State<AppState>, Path(id): Path<i64>) -> Api
 }
 
 pub async fn book_stats(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
-    require_book(&st.db, id)?;
+    let book = require_book(&st.db, id)?;
     let metas = st.db.list_chapter_metas(id)?;
+    let (draft_chapters, draft_words) =
+        metas.iter().filter(|m| m.word_count > 0 && m.published_at.is_none()).fold((0, 0), |(n, w), m| (n + 1, w + m.word_count));
     let words: i64 = metas.iter().map(|m| m.word_count).sum();
     let ai_chars: i64 = metas.iter().map(|m| m.ai_chars).sum();
     let daily: Vec<Value> = st.db.daily_words(id, 30)?.into_iter().map(|(day, w)| json!({ "day": day, "words": w })).collect();
@@ -276,7 +278,106 @@ pub async fn book_stats(State(st): State<AppState>, Path(id): Path<i64>) -> ApiR
         "tokens": { "prompt": prompt_tokens, "completion": completion_tokens, "estimated": estimated },
         "cost": (cost * 100.0).round() / 100.0,
         "curve": curve,
+        "published": metas.iter().filter(|m| m.published_at.is_some()).count(),
+        "drafts": {
+            "chapters": draft_chapters,
+            "words": draft_words,
+            "update_target": book.update_target,
+            "days": (book.update_target > 0).then(|| (draft_words as f64 / book.update_target as f64 * 10.0).floor() / 10.0),
+        },
     })))
+}
+
+/// 网页文本框的 UTF-16 下标换成字节下标；超出正文或落在代理对中间时返回 None
+fn utf16_to_byte(text: &str, at: usize) -> Option<usize> {
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        if units == at {
+            return Some(i);
+        }
+        units += c.len_utf16();
+        if units > at {
+            return None;
+        }
+    }
+    (units == at).then_some(text.len())
+}
+
+#[derive(Deserialize)]
+pub struct SplitRequest {
+    /// 拆分位置：UTF-16 下标，和网页文本框的光标位置一致
+    pub at: usize,
+}
+
+/// 在光标处拆成两章：前半留在原章，后半放进紧跟其后的新章；拆之前给原章存快照
+pub async fn split_chapter(State(st): State<AppState>, Path(id): Path<i64>, Json(r): Json<SplitRequest>) -> ApiResult<Chapter> {
+    let mut ch = st.db.get_chapter(id)?.ok_or_else(|| not_found("章节"))?;
+    let byte = utf16_to_byte(&ch.content, r.at).ok_or_else(|| bad_request("拆分位置超出了正文"))?;
+    let (head, tail) = ch.content.split_at(byte);
+    let (head, tail) = (head.trim_end().to_string(), tail.trim_start().to_string());
+    if head.is_empty() || tail.is_empty() {
+        return Err(bad_request("光标要放在正文中间，前后都得有内容"));
+    }
+    st.db.create_version(id, &ch.content, "拆章前")?;
+    ch.content = head;
+    st.db.update_chapter(&ch)?;
+    let new = st.db.create_chapter(&Chapter { book_id: ch.book_id, volume_id: ch.volume_id, content: tail, status: "draft".into(), ..Default::default() })?;
+    let mut ids: Vec<i64> = st.db.list_chapter_metas(ch.book_id)?.into_iter().map(|m| m.id).filter(|&x| x != new.id).collect();
+    let pos = ids.iter().position(|&x| x == id).map_or(ids.len(), |p| p + 1);
+    ids.insert(pos, new.id);
+    st.db.reorder_chapters(ch.book_id, &ids)?;
+    st.db.touch_book(ch.book_id)?;
+    Ok(Json(st.db.get_chapter(new.id)?.ok_or_else(|| not_found("章节"))?))
+}
+
+/// 把下一章接到这一章后面并删掉下一章；它的版本、设定状态、揭示进度等都转到这一章，
+/// 合并前这一章的原文、下一章的原文各存一个快照
+pub async fn merge_next_chapter(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Chapter> {
+    let mut ch = st.db.get_chapter(id)?.ok_or_else(|| not_found("章节"))?;
+    let metas = st.db.list_chapter_metas(ch.book_id)?;
+    let pos = metas.iter().position(|m| m.id == id).ok_or_else(|| not_found("章节"))?;
+    let next_meta = metas.get(pos + 1).ok_or_else(|| bad_request("已经是最后一章了"))?;
+    let next = st.db.get_chapter(next_meta.id)?.ok_or_else(|| not_found("章节"))?;
+    st.db.create_version(id, &ch.content, "合并前")?;
+    st.db.create_version(id, &next.content, &format!("合并进来的「{}」原文", next_meta.label()))?;
+    let join = |a: &str, b: &str, sep: &str| match (a.trim().is_empty(), b.trim().is_empty()) {
+        (true, _) => b.trim().to_string(),
+        (_, true) => a.trim().to_string(),
+        _ => format!("{}{sep}{}", a.trim_end(), b.trim_start()),
+    };
+    let sep = if ch.content.contains("\n\n") { "\n\n" } else { "\n" };
+    ch.content = join(&ch.content, &next.content, sep);
+    ch.outline = join(&ch.outline, &next.outline, "\n");
+    ch.summary = join(&ch.summary, &next.summary, "\n");
+    ch.beats = join(&ch.beats, &next.beats, "\n");
+    // 章末换成了下一章的结尾，张力和钩子要重新分析
+    ch.metrics = Value::Null;
+    if next.status != "done" {
+        ch.status = next.status.clone();
+    }
+    if next.published_at.is_none() {
+        ch.published_at = None;
+    }
+    st.db.update_chapter(&ch)?;
+    st.db.add_ai_chars(id, next.ai_chars)?;
+    st.db.repoint_chapter(next.id, id)?;
+    st.db.delete_chapter(next.id)?;
+    st.db.touch_book(ch.book_id)?;
+    Ok(Json(st.db.get_chapter(id)?.ok_or_else(|| not_found("章节"))?))
+}
+
+#[derive(Deserialize)]
+pub struct PublishRequest {
+    pub chapter_id: i64,
+    pub published: bool,
+}
+
+/// 连载进度：标记到某一章为止都已发布，或者从某一章起取消发布
+pub async fn publish_chapters(State(st): State<AppState>, Path(book_id): Path<i64>, Json(r): Json<PublishRequest>) -> ApiResult<Value> {
+    require_book(&st.db, book_id)?;
+    st.db.get_chapter(r.chapter_id)?.filter(|c| c.book_id == book_id).ok_or_else(|| not_found("章节"))?;
+    let changed = st.db.publish_through(book_id, r.chapter_id, r.published)?;
+    Ok(Json(json!({ "changed": changed })))
 }
 
 // ---------- 卷 ----------
@@ -1092,6 +1193,12 @@ pub struct LintRequest {
 pub async fn lint(State(st): State<AppState>, Json(r): Json<LintRequest>) -> ApiResult<crate::lint::LintReport> {
     let settings = st.db.get_settings()?;
     let mut report = crate::lint::lint(&r.text, &settings.extra_cliches);
+    let flagged = crate::lint::sensitive_issues(&r.text, &settings.sensitive_words, &settings.sensitive_ignore);
+    if !flagged.is_empty() {
+        let penalty: i32 = flagged.iter().map(|i| match i.severity.as_str() { "high" => 6, "medium" => 3, _ => 1 }).sum();
+        report.score = (report.score - penalty).max(0);
+        report.issues.splice(0..0, flagged);
+    }
     let copied = crate::lint::source_overlap(&r.text, &st.db.lib_sources(r.book_id)?);
     if !copied.is_empty() {
         report.score = (report.score - copied.len() as i32 * 5).max(0);

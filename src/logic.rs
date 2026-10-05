@@ -15,6 +15,7 @@ pub fn check(d: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
     leaks(d, &mut out);
     reveals(d, &mut out);
+    opening(d, &mut out);
     new_terms(d, &mut out);
     exposition(d, &mut out);
     realms(d, &mut out);
@@ -79,7 +80,7 @@ fn leaks(d: &BookData, out: &mut Vec<Finding>) {
     for c in written(d) {
         let at = Some(d.point(c));
         for e in d.entries.iter().filter(|e| !e.gate().open_at(at)) {
-            if let Some((pos, kw)) = first_hit(&keys(e), &c.content) {
+            if let Some((pos, kw)) = first_hit(&keys(e), &e.scan_text(&c.content)) {
                 let mut f = finding("critical", "设定超前", format!("{}出现了「{kw}」，这条设定是「{}」，这一章还不该写出来", d.label(c), e.gate().label()));
                 f.chapter_id = Some(c.id);
                 f.entry_id = Some(e.id);
@@ -101,11 +102,7 @@ const WARM_UP_AHEAD: i64 = 5;
 
 /// 先把例外说法换成等长的空格再找泄露词，「天轨护道盟」就不算点破「天轨」，命中位置仍对得上原文。
 fn leak_hit(text: &str, terms: &[String], exceptions: &[String]) -> Option<(usize, String)> {
-    let mut masked = text.to_string();
-    for ex in exceptions.iter().filter(|e| !e.is_empty()) {
-        masked = masked.replace(ex.as_str(), &" ".repeat(ex.len()));
-    }
-    first_hit(terms, &masked)
+    first_hit(terms, &mask_excluded(text, exceptions))
 }
 
 /// 揭示计划草稿的泄露词里，已写章节在揭开之前就写出来的：每个词和它第一次出现的章号。
@@ -243,7 +240,11 @@ fn new_terms(d: &BookData, out: &mut Vec<Finding>) {
     for c in written(d) {
         let mut fresh: Vec<String> = Vec::new();
         for e in &entries {
-            if !seen_entries.contains(&e.id) && keys(e).iter().any(|k| c.content.contains(k.as_str())) {
+            if seen_entries.contains(&e.id) {
+                continue;
+            }
+            let text = e.scan_text(&c.content);
+            if keys(e).iter().any(|k| text.contains(k.as_str())) {
                 seen_entries.insert(e.id);
                 fresh.push(e.name.trim().to_string());
             }
@@ -262,6 +263,54 @@ fn new_terms(d: &BookData, out: &mut Vec<Finding>) {
             );
             f.chapter_id = Some(c.id);
             out.push(f);
+        }
+    }
+}
+
+// ---------- 开篇 ----------
+
+/// 番茄作者圈总结的签约硬线：主角前 300 字登场、金手指前 1000 字亮出、前三章章末都要有钩子
+const HERO_WITHIN: usize = 300;
+const GOLDEN_WITHIN: usize = 1000;
+
+fn opening(d: &BookData, out: &mut Vec<Finding>) {
+    let chapters = written(d);
+    let Some(first) = chapters.iter().copied().find(|c| d.number(c) == Some(1)) else { return };
+    let text = first.content.as_str();
+    let mut flag = |message: String, c: &Chapter, at: Option<usize>| {
+        let mut f = finding("warn", "开篇", message);
+        f.chapter_id = Some(c.id);
+        if let Some(i) = at {
+            f.quote = sentence_at(&c.content, i);
+        }
+        out.push(f);
+    };
+    if let Some(hero) = d.entries.iter().find(|e| e.kind == "character" && e.role == "主角") {
+        match first_hit(&keys(hero), &hero.scan_text(text)) {
+            None => flag(format!("第1章没写到主角「{}」", hero.name), first, None),
+            Some((i, _)) => {
+                let n = text[..i].chars().count();
+                if n > HERO_WITHIN {
+                    flag(format!("主角「{}」到第1章第 {n} 字才出场，签约编辑一般要求前 {HERO_WITHIN} 字内登场", hero.name), first, Some(i));
+                }
+            }
+        }
+    }
+    let golden = split_terms(&d.book.golden_finger);
+    if !golden.is_empty() {
+        match first_hit(&golden, text) {
+            None => flag(format!("第1章没亮出金手指「{}」，签约编辑一般要求前 {GOLDEN_WITHIN} 字内亮出来", golden[0]), first, None),
+            Some((i, k)) => {
+                let n = text[..i].chars().count();
+                if n > GOLDEN_WITHIN {
+                    flag(format!("金手指「{k}」到第1章第 {n} 字才亮出来，签约编辑一般要求前 {GOLDEN_WITHIN} 字内"), first, Some(i));
+                }
+            }
+        }
+    }
+    for c in chapters.iter().copied().filter(|c| matches!(d.number(c), Some(1..=3))) {
+        if c.metrics["hook"]["type"].as_str().map(str::trim).is_some_and(|t| t.is_empty() || t == "无") {
+            flag(format!("{}没有章末钩子：开篇三章每章结尾都要让读者想点下一章", d.label(c)), c, None);
         }
     }
 }
@@ -370,7 +419,7 @@ fn breakthroughs<'p>(p: &'p str, realms: &[String]) -> Vec<(Level, &'p str, usiz
 /// 主角：标成主角的人物，其次是常驻人物，再次是正文里出现最多的人物。
 fn protagonist(d: &BookData) -> Option<&Entry> {
     let people = || d.entries.iter().filter(|e| e.kind == "character");
-    let mentions = |e: &Entry| -> usize { keys(e).iter().map(|k| d.chapters.iter().map(|c| c.content.matches(k.as_str()).count()).sum::<usize>()).sum() };
+    let mentions = |e: &Entry| -> usize { d.chapters.iter().map(|c| { let t = e.scan_text(&c.content); keys(e).iter().map(|k| t.matches(k.as_str()).count()).sum::<usize>() }).sum() };
     people().find(|e| e.role == "主角").or_else(|| people().find(|e| e.always_include)).or_else(|| people().max_by_key(|e| mentions(e)))
 }
 
@@ -512,7 +561,7 @@ fn items(d: &BookData, out: &mut Vec<Finding>) {
         let mut gone: Option<(&Chapter, String)> = None;
         for c in &chapters {
             if let Some((g, why)) = &gone {
-                if let Some(quote) = used_in(&c.content, &ks) {
+                if let Some(quote) = used_in(&e.scan_text(&c.content), &ks) {
                     let mut f = finding(
                         "warn",
                         "物品去向",
@@ -558,6 +607,25 @@ mod tests {
 
     fn kinds(found: &[Finding]) -> Vec<&str> {
         found.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    #[test]
+    fn opening_rules() {
+        use serde_json::json;
+        let hero = Entry { id: 1, kind: "character".into(), name: "陈渊".into(), role: "主角".into(), ..Default::default() };
+        let mut c1 = ch(1, &format!("{}陈渊睁开眼。{}太虚梦潮在他眼前展开。", "矿洞里很黑。".repeat(60), "风很冷。".repeat(200)));
+        c1.metrics = json!({ "hook": { "type": "截断" } });
+        let mut c2 = ch(2, "陈渊继续往前走。");
+        c2.metrics = json!({ "hook": { "type": "无" } });
+        let c3 = ch(3, "陈渊到了矿口。");
+        let b = Book { golden_finger: "太虚梦潮、梦潮".into(), ..Default::default() };
+        let vols = vec![Volume { id: 1, title: "第一卷".into(), sort: 1, ..Default::default() }];
+        let d = BookData::new(b, vols, vec![c1, c2, c3], vec![hero], vec![], vec![]);
+        let found: Vec<Finding> = check(&d).into_iter().filter(|f| f.kind == "开篇").collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found[0].message.contains("主角「陈渊」到第1章第 360 字才出场") && found[0].quote == "陈渊睁开眼。");
+        assert!(found[1].message.contains("金手指「太虚梦潮」到第1章第 1166 字"));
+        assert!(found[2].chapter_id == Some(2) && found[2].message.contains("没有章末钩子"), "第3章没做定稿分析，不报");
     }
 
     #[test]

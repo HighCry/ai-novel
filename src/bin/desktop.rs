@@ -121,6 +121,7 @@ fn start_server(db: Db) -> Result<u16, String> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("启动异步运行时");
         rt.block_on(async move {
+            tokio::spawn(ai_novel::backup::auto_loop(state.db.clone()));
             let listener = tokio::net::TcpListener::from_std(listener).expect("监听端口");
             if let Err(e) = axum::serve(listener, build_router(state)).await {
                 tracing::error!("本地服务退出：{e}");
@@ -337,6 +338,7 @@ fn serve_only(db: Db, args: ServeArgs) {
     let state = AppState::new(db, args.password);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("启动异步运行时");
     rt.block_on(async move {
+        tokio::spawn(ai_novel::backup::auto_loop(state.db.clone()));
         listener.set_nonblocking(true).expect("设置非阻塞");
         let listener = tokio::net::TcpListener::from_std(listener).expect("监听端口");
         if let Err(e) = axum::serve(listener, build_router(state)).await {

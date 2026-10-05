@@ -1,6 +1,6 @@
 import { api, streamInto } from './api.js';
 import { store, on, emit, scope, chapterLabel, reload } from './store.js';
-import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, countWords, themeButton, moreButton, icon, pushLayer } from './ui.js';
+import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, fmtTime, countWords, themeButton, moreButton, icon, pushLayer } from './ui.js';
 import { renderPanels } from './panels.js';
 import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette, openSkills } from './dialogs.js';
 import { attachAssist, pref } from './assist.js';
@@ -170,7 +170,9 @@ function buildMain(main) {
       els.num, els.title, els.volume, els.status,
       highlight,
       h('button', { class: 'ghost small', title: '给当前内容存一个快照', onclick: snapshot }, '快照'),
-      h('button', { class: 'ghost small', title: '查看和恢复历史版本', onclick: () => openVersions() }, '历史')),
+      h('button', { class: 'ghost small', title: '查看和恢复历史版本', onclick: () => openVersions() }, '历史'),
+      h('button', { class: 'ghost small desk-only', title: '在光标处拆成两章：光标后面的内容移到紧跟着的新章节', onclick: splitHere }, '拆章'),
+      h('button', { class: 'ghost small desk-only', title: '把下一章接到这一章后面', onclick: mergeNext }, '并下章')),
     els.outlineBox,
     els.beatsBox,
     els.wrap);
@@ -449,18 +451,78 @@ function chapterRow(m) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   const dot = m.status === 'done' ? 's-done' : m.word_count ? 's-draft' : 's-none';
   return h('div', {
-    class: 'ch-row' + (store.chapter?.id === m.id ? ' active' : ''),
+    class: 'ch-row' + (store.chapter?.id === m.id ? ' active' : '') + (m.published_at ? ' published' : ''),
     dataset: { id: m.id },
-    title: `${chapterLabel(m)}${m.has_summary ? '（已有摘要）' : ''}`,
+    title: `${chapterLabel(m)}${m.has_summary ? '（已有摘要）' : ''}${m.published_at ? `，${fmtTime(m.published_at)}发布` : ''}`,
     onclick: () => openChapter(m.id),
   },
   h('span', { class: 'dot ' + dot }),
   h('span', { class: 'ch-name' }, chapterLabel(m)),
+  m.published_at ? h('span', { class: 'pub-tag' }, '已发') : null,
   h('span', { class: 'wc' }, m.word_count ? fmtWords(m.word_count) : m.has_outline ? '有纲' : ''),
   h('span', { class: 'row-actions' },
+    m.word_count || m.published_at
+      ? h('button', {
+        class: 'icon-btn',
+        title: m.published_at ? '取消发布（这一章和后面的章节）' : '标成已发布（这一章和前面的章节）',
+        onclick: stop(() => publish(m)),
+      }, m.published_at ? '撤' : '发')
+      : null,
     h('button', { class: 'icon-btn', title: '上移', onclick: stop(() => move(m.id, -1)) }, '↑'),
     h('button', { class: 'icon-btn', title: '下移', onclick: stop(() => move(m.id, 1)) }, '↓'),
     h('button', { class: 'icon-btn', title: '删除', onclick: stop(() => removeChapter(m)) }, '✕')));
+}
+
+async function splitHere() {
+  if (!store.chapter) return;
+  const at = els.text.selectionStart;
+  const v = els.text.value;
+  if (!v.slice(0, at).trim() || !v.slice(at).trim()) return toast('先把光标放在要拆开的地方（正文中间）', 'warn');
+  if (!(await confirmBox(`在光标处拆成两章？光标后面的 ${countWords(v.slice(at))} 字会移到紧跟着的新章节，拆之前自动存快照。`, { okText: '拆章' }))) return;
+  try { await save({ force: true }); } catch { return; }
+  try {
+    const ch = await api.post(`/chapters/${store.chapter.id}/split`, { at });
+    await reload(['chapters']);
+    emit('chapters-changed');
+    await openChapter(ch.id);
+    toast('已拆成两章，新章节在后面，记得起个标题');
+    els.title.focus();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function mergeNext() {
+  if (!store.chapter) return;
+  const i = store.chapters.findIndex((c) => c.id === store.chapter.id);
+  const next = store.chapters[i + 1];
+  if (!next) return toast('已经是最后一章了', 'warn');
+  if (!(await confirmBox(`把「${chapterLabel(next)}」接到这一章后面，然后删掉它？它的历史版本、设定状态和揭示进度都会转到这一章，两章原文都会先存快照。`, { okText: '合并', danger: true }))) return;
+  try { await save({ force: true }); } catch { return; }
+  try {
+    const id = store.chapter.id;
+    await api.post(`/chapters/${id}/merge_next`);
+    await reload(['chapters']);
+    emit('chapters-changed');
+    await openChapter(id);
+    toast('已合并；章末变了，需要的话重新定稿分析张力和钩子');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function publish(m) {
+  const published = !m.published_at;
+  try {
+    const r = await api.post(`/books/${store.book.id}/publish`, { chapter_id: m.id, published });
+    await reload(['chapters']);
+    emit('chapters-changed');
+    const drafts = store.chapters.filter((c) => c.word_count > 0 && !c.published_at);
+    const words = drafts.reduce((a, c) => a + c.word_count, 0);
+    toast(`${published ? '标成已发布' : '取消发布'} ${r.changed} 章；存稿 ${drafts.length} 章 ${fmtWords(words)} 字`);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 function volumeRow(v) {

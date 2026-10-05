@@ -5,8 +5,10 @@ import { openSettings, openEntry, openThread, openFinalize, openContext, openTav
 import { openReveals, openRevealEditor } from './reveals.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
-const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味' };
+const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味', proofread: '校对' };
 const SELECT_TASKS = ['expand', 'shorten', 'rewrite', 'polish'];
+/** 只改原文、不写新内容的任务：可以整章做，结果直接进修订模式，采纳后不算 AI 字数 */
+const REVISE_TASKS = ['deslop', 'proofread'];
 
 let container = null;
 let current = localStorage.getItem('panelTab') || 'ai';
@@ -28,7 +30,11 @@ export function renderPanels(el) {
   scope.add(on('entries-changed', () => { if (current === 'bible') draw(); chatEl?.refresh(); }));
   scope.add(on('threads-changed', () => { if (current === 'threads') draw(); }));
   scope.add(on('switch-tab', switchTab));
-  scope.add(on('ai-run', (task) => { switchTab('ai'); aiEl?.run(task); }));
+  scope.add(on('ai-run', (t) => {
+    switchTab('ai');
+    const { task, ...extra } = typeof t === 'string' ? { task: t } : t;
+    aiEl?.run(task, extra);
+  }));
   scope.add(on('settings-changed', () => aiEl?.refreshNotice()));
   scope.add(() => { aiEl = null; chatEl = null; checkCache = null; container = null; });
 }
@@ -98,7 +104,7 @@ function buildAi() {
       const sel = store.editor.selection();
       const body = { task: lastTask, book_id: store.book.id, chapter_id: store.chapter.id, instruction: instruction.value.trim(), words: Number(words.value) || 800, finale: !!store.finale };
       if (SELECT_TASKS.includes(lastTask)) Object.assign(body, { selection: sel.text || '（这里是选中的文字）', before: sel.before, after: sel.after });
-      if (lastTask === 'deslop') Object.assign(body, sel.text ? { selection: sel.text, before: sel.before, after: sel.after } : { selection: store.editor.text() }, { skill: skillSel.value });
+      if (REVISE_TASKS.includes(lastTask)) Object.assign(body, sel.text ? { selection: sel.text, before: sel.before, after: sel.after } : { selection: store.editor.text() }, { skill: skillSel.value });
       if (lastTask === 'continue') Object.assign(body, { before: store.editor.text().slice(0, sel.end), after: store.editor.text().slice(sel.end) });
       openPreview(body);
     },
@@ -111,6 +117,10 @@ function buildAi() {
       h('button', { class: 'btn', title: '按本章章纲写出整章初稿', onclick: () => run('write_chapter') }, '写整章')),
     groupTitle('选中正文里的一段后'),
     h('div', { class: 'btn-grid four' }, SELECT_TASKS.map((t) => h('button', { class: 'btn', onclick: () => run(t) }, TASK_LABEL[t]))),
+    groupTitle('校对（只改错别字、病句、标点）'),
+    h('div', { class: 'btn-grid' },
+      h('button', { class: 'btn', title: '逐段找错别字、病句和标点错误，不润色；改动可以逐句选择', onclick: () => run('proofread') }, '整章校对'),
+      h('button', { class: 'btn', title: '只校对正文里选中的段落', onclick: () => run('proofread', { selectionOnly: true }) }, '选中段校对')),
     groupTitle('去 AI 味'),
     h('div', { class: 'btn-grid' },
       h('button', { class: 'btn', title: '按写作技能和本地检测结果修订整章，改动可以逐句选择', onclick: () => run('deslop') }, '整章去 AI 味'),
@@ -138,9 +148,10 @@ async function generate(task, { instruction, words, variants, outputs, skill, sk
   if (!ch || !ed) return toast('请先打开一个章节', 'warn');
   if (!modelReady()) { toast('请先在设置里配置模型', 'warn'); openSettings(); return; }
   let sel = ed.selection();
-  const needSel = SELECT_TASKS.includes(task) || (task === 'deslop' && selectionOnly);
+  const revising = REVISE_TASKS.includes(task);
+  const needSel = SELECT_TASKS.includes(task) || (revising && selectionOnly);
   if (needSel && !sel.text.trim()) return toast('请先在正文里选中一段文字', 'warn');
-  if (task === 'deslop' && !selectionOnly) {
+  if (revising && !selectionOnly) {
     const all = ed.text();
     if (!all.trim()) return toast('这一章还没有正文', 'warn');
     sel = { start: 0, end: all.length, text: all, before: '', after: '' };
@@ -151,7 +162,7 @@ async function generate(task, { instruction, words, variants, outputs, skill, sk
     body.before = ed.text().slice(0, sel.end);
     body.after = ed.text().slice(sel.end);
     body.words = words;
-  } else if (needSel || task === 'deslop') {
+  } else if (needSel || revising) {
     Object.assign(body, { selection: sel.text, before: sel.before, after: sel.after });
   }
   if (task === 'deslop') body.skill = skill;
@@ -236,16 +247,20 @@ function runVariant(body, sel, outputs, i, n, note = '') {
     const end = () => ed().text().length;
     // 每个按钮：[文字, 放进正文的操作, 会被替换的范围（用来记录采纳位置，供学习作者的修改）]
     const btns = [];
-    if (SELECT_TASKS.includes(body.task) || body.task === 'deslop') {
-      const whole = body.task === 'deslop' && !sel.before && !sel.after;
+    if (SELECT_TASKS.includes(body.task) || REVISE_TASKS.includes(body.task)) {
+      const whole = REVISE_TASKS.includes(body.task) && !sel.before && !sel.after;
       btns.push([whole ? '替换全文' : '替换选中', () => ed().replaceRange(sel.start, sel.end, get(), sel.text), () => [sel.start, sel.end]]);
       const toggle = h('button', { class: 'mini', title: '按句对比原文和修改，逐条决定采纳哪些', onclick: () => { showDiff(!diffParts); toggle.textContent = diffParts ? '退出修订' : '修订模式'; } }, '修订模式');
       actions.append(toggle);
-      // 去 AI 味直接进修订模式：改了哪些一目了然，不想要的点一下改回原文
-      if (body.task === 'deslop' && textEl.innerText.trim()) {
+      // 去 AI 味、校对直接进修订模式：改了哪些一目了然，不想要的点一下改回原文
+      if (REVISE_TASKS.includes(body.task) && textEl.innerText.trim()) {
         showDiff(true);
         toggle.textContent = '退出修订';
-        compareAi();
+        if (body.task === 'deslop') compareAi();
+        else {
+          const n = diffParts.filter((p) => p.type !== 'eq').length;
+          status.textContent = n ? `完成 · ${n} 处修改，点一下可以改回原文` : '完成 · 没有发现要改的地方';
+        }
       }
     }
     if (body.task === 'continue') btns.push(['插入到光标处', () => ed().insertAt(sel.end, get()), () => [sel.end, sel.end]]);
@@ -297,8 +312,8 @@ function runVariant(body, sel, outputs, i, n, note = '') {
     const where = { before: v.slice(Math.max(0, s - 30), s), after: v.slice(e, e + 30) };
     if (!apply()) return;
     try { await store.editor.save({ snapshot: `AI ${TASK_LABEL[body.task]}前` }); } catch { return; }
-    // 去 AI 味只是改原文，不算新采纳的 AI 字数，也不拿来学习作者的改法
-    if (body.task !== 'deslop') {
+    // 去 AI 味、校对只是改原文，不算新采纳的 AI 字数，也不拿来学习作者的改法
+    if (!REVISE_TASKS.includes(body.task)) {
       api.post(`/chapters/${body.chapter_id}/ai_accept`, { chars: countWords(text), text, task: body.task, ...where })
         .then(() => { store.chapter.ai_chars = (store.chapter.ai_chars || 0) + countWords(text); store.editor.refreshCount(); })
         .catch(() => {});
@@ -498,6 +513,7 @@ async function runLint(out) {
     h('div', { class: 'score-line' },
       h('span', { class: 'ai-level ' + (r.ai_level === '轻度' ? 'good' : r.ai_level === '中度' ? 'mid' : 'bad') }, `AI 味${r.ai_level}`),
       h('span', { class: 'grow small muted' }, `每千字约 ${r.ai_density.toFixed(1)} 处套话和模板句`),
+      h('button', { class: 'mini', title: 'AI 逐段找错别字、病句和标点错误，不润色', onclick: () => emit('ai-run', 'proofread') }, '校对'),
       h('button', { class: 'mini primary', title: '按写作技能修订整章，改动可以逐句选择', onclick: () => emit('ai-run', 'deslop') }, '去 AI 味')),
     h('div', { class: 'stats-grid' },
       stat('字数', s.chars), stat('段落', s.paragraphs), stat('对话占比', Math.round(s.dialogue_ratio * 100) + '%'),

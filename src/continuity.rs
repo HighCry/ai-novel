@@ -43,16 +43,18 @@ pub(crate) fn finding(level: &str, kind: &str, message: String) -> Finding {
 }
 
 fn mentions(e: &Entry, text: &str) -> bool {
+    let text = e.scan_text(text);
     e.keywords().iter().filter(|k| k.chars().count() >= 2 || **k == e.name.trim()).any(|k| text.contains(k.as_str()))
 }
 
 /// 死者在这段文字里真正出场的第一句（截断后的原文）：名字后面紧跟的不是他留下的东西，整句也没有尸体、死讯、回忆这类说法。
 fn appearance(e: &Entry, text: &str) -> Option<String> {
+    let scan = e.scan_text(text);
     let mut hits: Vec<(usize, usize)> = e
         .keywords()
         .iter()
         .filter(|k| k.chars().count() >= 2 || **k == e.name.trim())
-        .flat_map(|k| text.match_indices(k.as_str()).map(|(i, m)| (i, i + m.len())).collect::<Vec<_>>())
+        .flat_map(|k| scan.match_indices(k.as_str()).map(|(i, m)| (i, i + m.len())).collect::<Vec<_>>())
         .collect();
     hits.sort_unstable();
     hits.into_iter()

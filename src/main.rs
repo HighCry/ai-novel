@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("正在监听 {}，但没有设置密码：局域网内任何人都能访问你的作品和接口密钥。建议加上 --password", args.host);
     }
     let state = AppState::new(db, args.password.clone());
+    tokio::spawn(ai_novel::backup::auto_loop(state.db.clone()));
     let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port))
         .await
         .with_context(|| format!("无法监听 {}:{}，端口可能被占用，可以用 --port 换一个", args.host, args.port))?;

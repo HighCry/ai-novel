@@ -237,6 +237,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .ch-row.active { background: var(--accent-soft); color: var(--accent); }
 .ch-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.pub-tag { font-size: 10px; padding: 0 4px; border-radius: 4px; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+.ch-row.published .ch-name { color: var(--muted); }
 .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
 .dot.s-draft { background: var(--warn); }
 .dot.s-done { background: var(--green); }
@@ -613,6 +615,10 @@ textarea.streaming, .out-text.streaming { animation: stream-glow 1.8s ease-in-ou
 .reader-page { animation: rise .45s var(--ease) backwards; }
 .reader-page h2 { margin: .4em 0 1.4em; text-align: center; font-family: var(--font-title); font-size: 1.4em; font-weight: 600; letter-spacing: .08em; }
 .reader-page p { margin: 0 0 .85em; text-indent: 2em; text-align: justify; font-family: var(--font-serif); line-height: 2; letter-spacing: .02em; }
+.reader-tts { display: inline-flex; align-items: center; gap: 6px; }
+.reader-tts .mini-select { padding: 2px 4px; font-size: 12px; max-width: 9em; }
+.reader.reading .reader-page .s { cursor: pointer; }
+.reader-page .s.speaking { background: var(--warn-soft); box-shadow: 0 0 0 2px var(--warn-soft); border-radius: 3px; }
 .reader-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px calc(10px + var(--safe-bottom)); border-top: 1px solid var(--border); background: var(--surface); }
 .reader-foot .btn:disabled { cursor: default; }
 
@@ -642,6 +648,7 @@ textarea.streaming, .out-text.streaming { animation: stream-glow 1.8s ease-in-ou
 
 @media (max-width: 760px) {
   .desk-only { display: none !important; }
+  .reader-tts select[title='朗读的声音'] { display: none; }
   .mobile-only { display: inline-flex !important; }
   body { -webkit-tap-highlight-color: transparent; }
 

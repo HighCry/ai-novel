@@ -250,6 +250,16 @@ CREATE TABLE IF NOT EXISTS progressions (
 CREATE INDEX IF NOT EXISTS idx_progressions ON progressions(entry_id);
 "#;
 
+/// 存稿和发布、设定名排除词、开篇体检用的金手指名
+const SCHEMA_V8: &str = r#"
+ALTER TABLE chapters ADD COLUMN published_at INTEGER;
+ALTER TABLE entries ADD COLUMN exclude TEXT NOT NULL DEFAULT '';
+ALTER TABLE books ADD COLUMN update_target INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE books ADD COLUMN golden_finger TEXT NOT NULL DEFAULT '';
+"#;
+
+const MIGRATIONS: [&str; 7] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8];
+
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
 fn lib_item_row(r: &Row) -> rusqlite::Result<LibItem> {
@@ -362,10 +372,12 @@ pub struct AiLog<'a> {
     pub estimated: bool,
 }
 
-const BOOK_COLS: &str = "id, title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at";
+const BOOK_COLS: &str =
+    "id, title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at, golden_finger, update_target";
 const VOL_COLS: &str = "id, book_id, title, outline, summary, sort";
-const CH_COLS: &str = "id, book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics";
-const ENTRY_COLS: &str = "id, book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret";
+const CH_COLS: &str =
+    "id, book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics, published_at";
+const ENTRY_COLS: &str = "id, book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret, exclude";
 const THREAD_COLS: &str = "id, book_id, title, detail, status, planted_chapter_id, resolved_chapter_id, updated_at, target_chapter, last_chapter_id";
 
 fn book_row(r: &Row) -> rusqlite::Result<Book> {
@@ -383,6 +395,8 @@ fn book_row(r: &Row) -> rusqlite::Result<Book> {
         target_words: r.get(10)?,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+        golden_finger: r.get(13)?,
+        update_target: r.get(14)?,
     })
 }
 
@@ -407,6 +421,7 @@ fn chapter_row(r: &Row) -> rusqlite::Result<Chapter> {
         updated_at: r.get(12)?,
         beats: r.get(13)?,
         metrics: json_value(r.get(14)?),
+        published_at: r.get(15)?,
     })
 }
 
@@ -426,6 +441,7 @@ fn entry_row(r: &Row) -> rusqlite::Result<Entry> {
         fields: json_map(r.get(11)?),
         visibility: r.get(12)?,
         secret: r.get(13)?,
+        exclude: r.get(14)?,
     })
 }
 
@@ -509,29 +525,7 @@ impl Db {
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
         let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0));
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            conn.execute_batch(SCHEMA_V1)?;
-            conn.execute_batch("PRAGMA user_version = 1;")?;
-        }
-        if version < 2 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
-        }
-        if version < 3 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
-        }
-        if version < 4 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
-        }
-        if version < 5 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
-        }
-        if version < 6 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
-        }
-        if version < 7 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
-        }
+        migrate(&conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)), lib_rev: Arc::new(AtomicU64::new(1)) })
     }
 
@@ -539,6 +533,65 @@ impl Db {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    // ---------- 备份 ----------
+
+    /// 数据库文件路径；内存库返回 None
+    pub fn file_path(&self) -> Option<std::path::PathBuf> {
+        self.c().path().filter(|p| !p.is_empty()).map(std::path::PathBuf::from)
+    }
+
+    /// 本机时间，形如 20261005-233313（借 SQLite 的 localtime，不另引日期库）
+    pub fn local_stamp(&self) -> Result<String> {
+        Ok(self.c().query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now', 'localtime')", [], |r| r.get(0))?)
+    }
+
+    /// VACUUM INTO 拍一份一致的快照，WAL 里还没写回的改动也在里面
+    pub fn snapshot_to(&self, dst: &Path) -> Result<()> {
+        self.c().execute("VACUUM INTO ?1", [dst.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// 用 SQLite 在线备份接口把快照整份写回当前库；快照来自旧版本时顺带升级表结构
+    pub fn restore_from(&self, src: &Path) -> Result<()> {
+        let from = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut c = self.c();
+        rusqlite::backup::Backup::new(&from, &mut c)?.run_to_completion(256, std::time::Duration::ZERO, None)?;
+        migrate(&c)?;
+        drop(c);
+        self.lib_rev.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.c().query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+}
+
+/// 按 user_version 补齐表结构；打开库和从备份还原后都要跑一遍
+fn migrate(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        conn.execute_batch(SCHEMA_V1)?;
+        conn.execute_batch("PRAGMA user_version = 1;")?;
+    }
+    for (i, sql) in MIGRATIONS.iter().enumerate() {
+        let v = i as i64 + 2;
+        if version < v {
+            conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {v}; COMMIT;"))?;
+        }
+    }
+    Ok(())
+}
+
+impl Db {
     // ---------- 作品 ----------
 
     pub fn list_books(&self) -> Result<Vec<BookCard>> {
@@ -572,8 +625,9 @@ impl Db {
         let id = {
             let c = self.c();
             c.execute(
-                "INSERT INTO books (title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                "INSERT INTO books (title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at,
+                 golden_finger, update_target)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)",
                 params![
                     b.title.trim(),
                     b.genre,
@@ -585,7 +639,9 @@ impl Db {
                     b.style_guide,
                     b.style_sample,
                     if b.target_words > 0 { b.target_words } else { 2500 },
-                    t
+                    t,
+                    b.golden_finger.trim(),
+                    b.update_target.max(0)
                 ],
             )?;
             c.last_insert_rowid()
@@ -596,7 +652,7 @@ impl Db {
     pub fn update_book(&self, b: &Book) -> Result<()> {
         self.c().execute(
             "UPDATE books SET title = ?2, genre = ?3, platform = ?4, logline = ?5, synopsis = ?6, worldview = ?7, outline = ?8,
-             style_guide = ?9, style_sample = ?10, target_words = ?11, updated_at = ?12 WHERE id = ?1",
+             style_guide = ?9, style_sample = ?10, target_words = ?11, updated_at = ?12, golden_finger = ?13, update_target = ?14 WHERE id = ?1",
             params![
                 b.id,
                 b.title.trim(),
@@ -609,7 +665,9 @@ impl Db {
                 b.style_guide,
                 b.style_sample,
                 b.target_words,
-                now()
+                now(),
+                b.golden_finger.trim(),
+                b.update_target.max(0)
             ],
         )?;
         Ok(())
@@ -675,7 +733,7 @@ impl Db {
         let mut metas = {
             let c = self.c();
             let mut st = c.prepare(
-                "SELECT id, volume_id, sort, title, status, word_count, ai_chars, length(outline) > 0, length(summary) > 0, updated_at, length(beats) > 0
+                "SELECT id, volume_id, sort, title, status, word_count, ai_chars, length(outline) > 0, length(summary) > 0, updated_at, length(beats) > 0, published_at
                  FROM chapters WHERE book_id = ?1 ORDER BY sort, id",
             )?;
             let rows = st.query_map([book_id], |r| {
@@ -692,6 +750,7 @@ impl Db {
                     has_summary: r.get(8)?,
                     updated_at: r.get(9)?,
                     has_beats: r.get(10)?,
+                    published_at: r.get(11)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -764,7 +823,7 @@ impl Db {
     pub fn update_chapter(&self, ch: &Chapter) -> Result<()> {
         self.c().execute(
             "UPDATE chapters SET volume_id = ?2, sort = ?3, title = ?4, outline = ?5, content = ?6, summary = ?7, status = ?8,
-             word_count = ?9, updated_at = ?10, beats = ?11, metrics = ?12 WHERE id = ?1",
+             word_count = ?9, updated_at = ?10, beats = ?11, metrics = ?12, published_at = ?13 WHERE id = ?1",
             params![
                 ch.id,
                 ch.volume_id,
@@ -777,14 +836,53 @@ impl Db {
                 count_words(&ch.content),
                 now(),
                 ch.beats,
-                value_json(&ch.metrics)
+                value_json(&ch.metrics),
+                ch.published_at
             ],
         )?;
         Ok(())
     }
 
+    /// 连载用：published 时把这一章和前面所有有正文的章节标成已发布（已发布的保留原时间），
+    /// 否则把这一章和后面的取消发布。返回改了几章。
+    pub fn publish_through(&self, book_id: i64, chapter_id: i64, published: bool) -> Result<usize> {
+        let c = self.c();
+        let sort: i64 = c.query_row("SELECT sort FROM chapters WHERE id = ?1 AND book_id = ?2", params![chapter_id, book_id], |r| r.get(0))?;
+        let n = if published {
+            c.execute(
+                "UPDATE chapters SET published_at = ?3 WHERE book_id = ?1 AND sort <= ?2 AND published_at IS NULL AND word_count > 0",
+                params![book_id, sort, now()],
+            )?
+        } else {
+            c.execute("UPDATE chapters SET published_at = NULL WHERE book_id = ?1 AND sort >= ?2 AND published_at IS NOT NULL", params![book_id, sort])?
+        };
+        Ok(n)
+    }
+
     pub fn delete_chapter(&self, id: i64) -> Result<()> {
         self.c().execute("DELETE FROM chapters WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// 合并章节、删掉被合并的那章之前，把指向它的记录都改成指向合并后的章节：
+    /// 历史版本、伏笔、AI 调用、设定状态、人物关系、采纳记录、揭示进度
+    pub fn repoint_chapter(&self, from: i64, to: i64) -> Result<()> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        for sql in [
+            "UPDATE versions SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE threads SET planted_chapter_id = ?2 WHERE planted_chapter_id = ?1",
+            "UPDATE threads SET resolved_chapter_id = ?2 WHERE resolved_chapter_id = ?1",
+            "UPDATE threads SET last_chapter_id = ?2 WHERE last_chapter_id = ?1",
+            "UPDATE ai_log SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE entry_states SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE relations SET since_chapter_id = ?2 WHERE since_chapter_id = ?1",
+            "UPDATE ai_accepts SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE reveal_events SET chapter_id = ?2 WHERE chapter_id = ?1",
+        ] {
+            tx.execute(sql, params![from, to])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -881,8 +979,8 @@ impl Db {
         let id = {
             let c = self.c();
             c.execute(
-                "INSERT INTO entries (book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO entries (book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret, exclude)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     e.book_id,
                     normalize_kind(&e.kind),
@@ -896,7 +994,8 @@ impl Db {
                     e.role.trim(),
                     map_json(&e.fields),
                     e.visibility.trim(),
-                    e.secret
+                    e.secret,
+                    e.exclude.trim()
                 ],
             )?;
             c.last_insert_rowid()
@@ -907,7 +1006,7 @@ impl Db {
     pub fn update_entry(&self, e: &Entry) -> Result<()> {
         self.c().execute(
             "UPDATE entries SET kind = ?2, name = ?3, aliases = ?4, description = ?5, state = ?6, immutable = ?7, always_include = ?8, updated_at = ?9,
-             role = ?10, fields = ?11, visibility = ?12, secret = ?13 WHERE id = ?1",
+             role = ?10, fields = ?11, visibility = ?12, secret = ?13, exclude = ?14 WHERE id = ?1",
             params![
                 e.id,
                 normalize_kind(&e.kind),
@@ -921,7 +1020,8 @@ impl Db {
                 e.role.trim(),
                 map_json(&e.fields),
                 e.visibility.trim(),
-                e.secret
+                e.secret,
+                e.exclude.trim()
             ],
         )?;
         Ok(())
@@ -1569,6 +1669,46 @@ impl Db {
         let rows = st.query_map([book_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// 按章节和任务数 AI 调用次数：(章节 id, 任务, 次数)；不属于哪一章的调用章节 id 为空
+    pub fn ai_usage_by_chapter(&self, book_id: i64) -> Result<Vec<(Option<i64>, String, i64)>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT chapter_id, task, COUNT(*) FROM ai_log WHERE book_id = ?1 GROUP BY chapter_id, task")?;
+        let rows = st.query_map([book_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 各章的创建、最后修改时间，历史版本数和最早、最晚一个版本的日期（本地时间）
+    pub fn chapter_history(&self, book_id: i64) -> Result<HashMap<i64, ChapterHistory>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT c.id,
+                    strftime('%Y-%m-%d %H:%M', c.created_at, 'unixepoch', 'localtime'),
+                    strftime('%Y-%m-%d %H:%M', c.updated_at, 'unixepoch', 'localtime'),
+                    COUNT(v.id),
+                    COALESCE(strftime('%Y-%m-%d', MIN(v.created_at), 'unixepoch', 'localtime'), ''),
+                    COALESCE(strftime('%Y-%m-%d', MAX(v.created_at), 'unixepoch', 'localtime'), '')
+             FROM chapters c LEFT JOIN versions v ON v.chapter_id = c.id
+             WHERE c.book_id = ?1 GROUP BY c.id",
+        )?;
+        let rows = st.query_map([book_id], |r| {
+            Ok((r.get(0)?, ChapterHistory { created: r.get(1)?, updated: r.get(2)?, versions: r.get(3)?, first_version: r.get(4)?, last_version: r.get(5)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 按本地时区格式化时间戳，fmt 是 SQLite strftime 的格式
+    pub fn local_time(&self, ts: i64, fmt: &str) -> Result<String> {
+        Ok(self.c().query_row("SELECT strftime(?2, ?1, 'unixepoch', 'localtime')", params![ts, fmt], |r| r.get(0))?)
+    }
+}
+
+pub struct ChapterHistory {
+    pub created: String,
+    pub updated: String,
+    pub versions: i64,
+    pub first_version: String,
+    pub last_version: String,
 }
 
 #[cfg(test)]

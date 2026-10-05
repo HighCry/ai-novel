@@ -155,6 +155,28 @@ const POLISH: &str = "{{context}}
 请润色【需要处理的段落】：修正病句、错别字和不通顺的地方，删掉套话和 AI 腔（解释腔、上帝视角、弱化副词堆砌、三连排比、段尾感悟），让节奏更紧凑；只做必要的修改，不改情节，不改人物的说话风格。{{instruction_block}}
 只输出处理后的段落，不要输出前文和后文，不要解释。";
 
+const PROOFREAD: &str = "{{before_block}}
+
+【需要校对的正文】
+{{selection}}
+
+{{after_block}}
+
+{{keep_block}}
+
+请校对【需要校对的正文】，只改确定的硬伤：
+1. 错别字：同音字、形近字用错（再/在、的/地/得、做/作、象/像、即/既、已/以、帐/账 等）；
+2. 明显的病句：成分残缺、搭配不当、语序颠倒，误打重复的字词（的的、了了）；
+3. 标点：中文里混进的英文标点、引号或括号不成对、问句用了句号、句末漏了标点。
+
+必须遵守：
+- 不润色、不改写、不换词，不调整句式和语气；没有硬伤的句子一个字都不要动；
+- 不增删情节、对白和信息，不合并、不拆分段落，保留原来的换行和空行；
+- 人名、地名、功法、境界等设定词和作者自创的词不是错别字，原样保留；
+- 人物对白里的口语、方言、口癖和故意的语病不算错误；
+- 拿不准的地方不要改。{{instruction_block}}
+直接输出校对后的完整正文，不要输出前文和后文，不要列出改了哪些地方，不要加任何说明。";
+
 const DESLOP: &str = "{{context}}
 
 {{before_block}}
@@ -537,6 +559,20 @@ pub const TEMPLATES: &[Template] = &[
         description: "润色选中的段落",
         vars: &[V_CONTEXT, ("before_block", "选区前文"), ("selection", "选中的段落"), ("after_block", "选区后文"), V_INSTRUCTION],
         text: POLISH,
+    },
+    Template {
+        id: "task.proofread",
+        name: "校对",
+        group: "写作",
+        description: "只改错别字、病句和标点，不润色；整章校对时按段落分块，每块一份",
+        vars: &[
+            ("before_block", "前文（只供理解）"),
+            ("selection", "要校对的正文"),
+            ("after_block", "后文（只供理解）"),
+            ("keep_block", "正文里出现的设定名、境界等不能当错别字改的词"),
+            V_INSTRUCTION,
+        ],
+        text: PROOFREAD,
     },
     Template {
         id: "task.deslop",

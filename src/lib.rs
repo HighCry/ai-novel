@@ -1,5 +1,7 @@
 pub mod ai;
 pub mod api;
+pub mod backup;
+pub mod declare;
 pub mod continuity;
 pub mod db;
 pub mod export;
@@ -13,6 +15,7 @@ pub mod logic;
 pub mod memory;
 pub mod models;
 pub mod prompts;
+pub mod sensitive;
 pub mod skillapi;
 pub mod skills;
 pub mod state;
@@ -39,15 +42,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/settings", get(get_settings).put(put_settings))
         .route("/settings/test", post(test_provider))
+        .route("/backups", get(backup::list_backups).post(backup::create_backup))
+        .route("/backups/{name}", axum::routing::delete(backup::delete_backup))
+        .route("/backups/{name}/restore", post(backup::restore_backup))
         .route("/books", get(list_books).post(create_book))
         .route("/books/{id}", get(get_book).patch(patch_book).delete(delete_book))
         .route("/books/{id}/stats", get(book_stats))
+        .route("/books/{id}/publish", post(publish_chapters))
+        .route("/books/{id}/declaration", get(declare::declaration))
+        .route("/books/{id}/creation_log", get(declare::creation_log))
         .route("/books/{id}/volumes", get(list_volumes).post(create_volume))
         .route("/volumes/{id}", patch(patch_volume).delete(delete_volume))
         .route("/books/{id}/chapters", get(list_chapters).post(create_chapter))
         .route("/books/{id}/chapters/reorder", post(reorder_chapters))
         .route("/chapters/{id}", get(get_chapter).patch(patch_chapter).delete(delete_chapter))
         .route("/chapters/{id}/ai_accept", post(ai_accept))
+        .route("/chapters/{id}/split", post(split_chapter))
+        .route("/chapters/{id}/merge_next", post(merge_next_chapter))
         .route("/chapters/{id}/versions", get(list_versions).post(create_version))
         .route("/versions/{id}", get(get_version))
         .route("/versions/{id}/restore", post(restore_version))

@@ -78,6 +78,10 @@ pub struct StyleCtx {
     pub guide: String,
     pub refs: Vec<Hit>,
     pub revise: Option<Revise>,
+    /// 校对时正文里的设定词：前端核对修改稿里有没有被改掉
+    pub proofread_keep: Option<Vec<String>>,
+    /// 分块修订、校对时块与块之间的段落分隔符
+    pub sep: &'static str,
 }
 
 impl StyleCtx {
@@ -94,6 +98,8 @@ type Vars = HashMap<&'static str, String>;
 
 /// 所有 JSON 任务都追加这条，作者改过模板也能保证格式（中文模型常在字符串里用英文引号）。
 pub const JSON_RULE: &str = "\n\n输出格式要求：只输出一个合法的 JSON 对象，不要加任何说明文字；JSON 字符串内部需要引号时用「」或“”，不要用英文双引号。";
+
+const PROOFREADER: &str = "你是严谨的中文校对编辑，熟悉网络小说。你只改正文字硬伤：错别字、明显的病句和标点错误；不评价、不润色、不改写作者的表达。";
 
 /// 会带上文风指南和范文参考的写正文任务
 const STYLED_TASKS: &[&str] = &["continue", "write_chapter", "expand", "rewrite", "polish", "ghost", "insert", "deslop"];
@@ -211,6 +217,19 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
         Prepared { role, messages: vec![Message::system(system), Message::user(user)], json }
     };
     match task {
+        "proofread" => {
+            let d = need(data)?;
+            if req.selection.trim().is_empty() {
+                return Err(bad_request("没有要校对的正文"));
+            }
+            let mut v = Vars::new();
+            v.insert("before_block", titled_block("前文（只供理解，不要校对）", &tail_chars(&req.before, 300), 300));
+            v.insert("after_block", titled_block("后文（只供理解，不要校对）", &head_chars(&req.after, 200), 200));
+            v.insert("keep_block", titled("设定词（不是错别字，原样保留）", &skills::keep_terms(&d.entries, &req.selection).join("、")));
+            v.insert("selection", req.selection.clone());
+            v.insert("instruction_block", instruction_block(&req.instruction, "作者的要求"));
+            Ok(prepared(Role::Writer, PROOFREADER.to_string(), "task.proofread", &v, false))
+        }
         "deslop" => {
             let d = need(data)?;
             let cur = req.chapter_id.and_then(|id| d.chapter(id));
@@ -781,7 +800,7 @@ fn revise_chunks(text: &str) -> Vec<String> {
     chunks
 }
 
-/// 组装提示词。一般只有一份；技能修订的正文较长时按段落分块，每块一份
+/// 组装提示词。一般只有一份；技能修订和校对的正文较长时按段落分块，每块一份
 async fn prepare_request(st: &AppState, req: &AiRequest) -> Result<(Settings, Vec<Prepared>, StyleCtx), AppError> {
     let settings = st.db.get_settings()?;
     let overrides = st.db.prompt_overrides()?;
@@ -790,23 +809,29 @@ async fn prepare_request(st: &AppState, req: &AiRequest) -> Result<(Settings, Ve
     if data.is_some() {
         style.skills = skills::rules_block(&skills::active(&st.db, &settings));
     }
-    if req.task != "deslop" {
+    if req.task != "deslop" && req.task != "proofread" {
         let prep = build(req, data.as_ref(), &settings, &overrides, &style)?;
         return Ok((settings, vec![prep], style));
     }
     let d = need(data.as_ref())?;
-    let id = if req.skill.trim().is_empty() { skills::DESLOP_ID } else { req.skill.trim() };
-    let skill = skills::find(&st.db, id)?.ok_or_else(|| not_found("技能"))?;
+    let skill = if req.task == "deslop" {
+        let id = if req.skill.trim().is_empty() { skills::DESLOP_ID } else { req.skill.trim() };
+        Some(skills::find(&st.db, id)?.ok_or_else(|| not_found("技能"))?)
+    } else {
+        None
+    };
     let text = if req.selection.trim().is_empty() {
         req.chapter_id.and_then(|id| d.chapter(id)).map(|c| c.content.clone()).unwrap_or_default()
     } else {
         req.selection.clone()
     };
-    let revise = |text: &str| Revise {
-        skill: skill.clone(),
-        text: text.to_string(),
-        report: crate::lint::lint(text, &settings.extra_cliches),
-        keep: skills::keep_terms(&d.entries, text),
+    let revise = |text: &str| {
+        skill.as_ref().map(|skill| Revise {
+            skill: skill.clone(),
+            text: text.to_string(),
+            report: crate::lint::lint(text, &settings.extra_cliches),
+            keep: skills::keep_terms(&d.entries, text),
+        })
     };
     let chunks = revise_chunks(&text);
     let sep = para_sep(&text);
@@ -814,15 +839,20 @@ async fn prepare_request(st: &AppState, req: &AiRequest) -> Result<(Settings, Ve
     for (i, chunk) in chunks.iter().enumerate() {
         // 每块的前后文用相邻的块
         let sub = AiRequest {
+            selection: chunk.clone(),
             before: if i == 0 { req.before.clone() } else { chunks[..i].join(sep) },
             after: if i + 1 == chunks.len() { req.after.clone() } else { chunks[i + 1..].join(sep) },
             ..req.clone()
         };
-        style.revise = Some(revise(chunk));
+        style.revise = revise(chunk);
         parts.push(build(&sub, data.as_ref(), &settings, &overrides, &style)?);
     }
     // meta 里给前端核对用的是整段的检测结果和保护词
-    style.revise = Some(revise(&text));
+    style.revise = revise(&text);
+    if skill.is_none() {
+        style.proofread_keep = Some(skills::keep_terms(&d.entries, &text));
+    }
+    style.sep = sep;
     Ok((settings, parts, style))
 }
 
@@ -840,6 +870,10 @@ fn style_meta(style: &StyleCtx) -> Value {
             "ai_level": r.report.ai_level,
             "ai_density": r.report.ai_density,
         });
+    }
+    // 校对只改个别字，删掉超过 3% 多半是把句子删了
+    if let Some(keep) = &style.proofread_keep {
+        meta["revise"] = json!({ "skill": "校对", "keep": keep, "max_cut": 3 });
     }
     meta
 }
@@ -988,10 +1022,14 @@ pub async fn stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let (settings, parts, style) = prepare_request(&st, &req).await?;
     let meta = Event::default().event("meta").data(style_meta(&style).to_string());
-    let sep = style.revise.as_ref().map_or("\n", |r| para_sep(&r.text));
+    let sep = if style.sep.is_empty() { "\n" } else { style.sep };
     let (cfg, provider) = settings.resolve(parts[0].role).map_err(|e| bad_request(e.to_string()))?;
     // 修订要克制：温度高了模型会顺手改掉没问题的句子
-    let base = if req.task == "deslop" { cfg.temperature.min(0.7) } else { cfg.temperature };
+    let base = match req.task.as_str() {
+        "deslop" => cfg.temperature.min(0.7),
+        "proofread" => cfg.temperature.min(0.3),
+        _ => cfg.temperature,
+    };
     let chats: Vec<ChatRequest> = parts
         .into_iter()
         .map(|p| ChatRequest {
@@ -1125,6 +1163,23 @@ mod tests {
         assert_eq!(clean_plain("**剧情摘要：**\n\n林凡进了城，**遇到**苏雨。"), "林凡进了城，遇到苏雨。");
         assert_eq!(clean_plain("# 卷摘要\n---\n剧情摘要：第一卷讲了……"), "第一卷讲了……");
         assert_eq!(clean_plain("正常文本"), "正常文本");
+    }
+
+    #[test]
+    fn proofread_prompt_keeps_setting_terms() {
+        use super::{build, AiRequest, StyleCtx};
+        use crate::memory::BookData;
+        use crate::models::{Book, Entry, Settings};
+        let entries = vec![Entry { id: 1, kind: "character".into(), name: "陈渊".into(), ..Default::default() }];
+        let d = BookData::new(Book { style_guide: "多用短句".into(), ..Default::default() }, vec![], vec![], entries, vec![], vec![]);
+        let req = AiRequest { task: "proofread".into(), selection: "陈渊再屋里坐着.".into(), before: "天黑了。".into(), ..Default::default() };
+        let p = build(&req, Some(&d), &Settings::default(), &Default::default(), &StyleCtx::default()).unwrap_or_else(|_| panic!("组装失败"));
+        let user = &p.messages[1].content;
+        assert!(user.contains("【设定词（不是错别字，原样保留）】陈渊"), "{user}");
+        assert!(user.contains("【前文（只供理解，不要校对）】\n天黑了。") && user.contains("陈渊再屋里坐着."), "{user}");
+        assert!(!p.messages[0].content.contains("多用短句"), "校对不带文风要求");
+        let empty = AiRequest { task: "proofread".into(), ..Default::default() };
+        assert!(build(&empty, Some(&d), &Settings::default(), &Default::default(), &StyleCtx::default()).is_err());
     }
 
     #[test]

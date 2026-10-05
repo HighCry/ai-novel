@@ -78,7 +78,7 @@ pub async fn submission_check(State(st): State<AppState>, Path(book_id): Path<i6
     let data = load_book_data(&st.db, book_id)?;
     let s = st.db.get_settings()?;
     let list: Vec<(Option<i64>, &Chapter)> = data.chapters.iter().map(|c| (data.number(c), c)).collect();
-    let items = export::submission_check(&list, s.min_chapter_words, s.max_chapter_words);
+    let items = export::submission_check(&list, s.min_chapter_words, s.max_chapter_words, (&s.sensitive_words, &s.sensitive_ignore));
     Ok(Json(json!({ "chapters": list.len(), "items": items })))
 }
 

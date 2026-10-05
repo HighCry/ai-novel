@@ -45,6 +45,10 @@ pub struct Book {
     pub target_words: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 金手指的名字和别名（顿号分隔），开篇体检查它第几字亮出来
+    pub golden_finger: String,
+    /// 每天更新多少字，算存稿还够更几天；0 表示没定
+    pub update_target: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +94,8 @@ pub struct Chapter {
     pub metrics: Value,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 发到平台上的时间；空表示还没发，有正文的算存稿
+    pub published_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +112,17 @@ pub struct ChapterMeta {
     pub has_summary: bool,
     pub has_beats: bool,
     pub updated_at: i64,
+    pub published_at: Option<i64>,
+}
+
+impl ChapterMeta {
+    pub fn label(&self) -> String {
+        match self.number {
+            Some(n) if self.title.trim().is_empty() => format!("第{n}章"),
+            Some(n) => format!("第{n}章 {}", self.title.trim()),
+            None => self.title.trim().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -140,6 +157,8 @@ pub struct Entry {
     pub visibility: String,
     /// 作者底牌：真实身份、后期反转这类读者暂时不能知道的设定，任何任务都不发给模型
     pub secret: String,
+    /// 排除短语（顿号分隔）：名字落在这些短语里不算提到，比如人名「平安」不匹配「平平安安」
+    pub exclude: String,
 }
 
 /// 设定在某一章的状态快照。phase = start 表示从这一章开始生效（手动修改），
@@ -194,6 +213,30 @@ impl Entry {
     pub fn gate(&self) -> crate::visibility::Gate {
         crate::visibility::Gate::parse(&self.visibility).unwrap_or(crate::visibility::Gate::Hidden)
     }
+
+    pub fn excludes(&self) -> Vec<String> {
+        split_terms(&self.exclude)
+    }
+
+    /// 拿来找这条设定的文字：排除短语盖掉，偏移和原文一致
+    pub fn scan_text<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        mask_excluded(text, &self.excludes())
+    }
+}
+
+/// 把排除短语占的字节换成空格：字节长度不变，在结果里找到的位置可以直接用在原文上
+pub fn mask_excluded<'a>(text: &'a str, excludes: &[String]) -> std::borrow::Cow<'a, str> {
+    let present: Vec<&String> = excludes.iter().filter(|p| !p.is_empty() && text.contains(p.as_str())).collect();
+    if present.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    for p in present {
+        for (i, m) in text.match_indices(p.as_str()) {
+            bytes[i..i + m.len()].fill(b' ');
+        }
+    }
+    std::borrow::Cow::Owned(String::from_utf8(bytes).expect("整字替换成空格仍是合法 UTF-8"))
 }
 
 pub fn kind_label(kind: &str) -> &'static str {
@@ -501,6 +544,14 @@ pub struct Settings {
     pub embedding: EmbedRole,
     /// 启用的写作技能 id，按顺序注入写作规则（内置的「网文去AI味」默认启用）
     pub skills: Vec<String>,
+    /// 自动备份保留最近几份
+    pub backup_keep: usize,
+    /// 每次备份后再复制一份到这个文件夹（比如网盘同步目录），空表示不复制
+    pub backup_mirror: String,
+    /// 追加的敏感词，一行一个，「词=改法」可以带上改法
+    pub sensitive_words: Vec<String>,
+    /// 不再提示的敏感词
+    pub sensitive_ignore: Vec<String>,
 }
 
 impl Default for Settings {
@@ -519,6 +570,10 @@ impl Default for Settings {
             use_style_guide: true,
             embedding: EmbedRole::default(),
             skills: vec![crate::skills::DESLOP_ID.to_string()],
+            backup_keep: 14,
+            backup_mirror: String::new(),
+            sensitive_words: vec![],
+            sensitive_ignore: vec![],
         }
     }
 }

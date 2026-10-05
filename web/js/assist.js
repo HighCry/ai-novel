@@ -78,6 +78,7 @@ export function attachAssist(ta, wrap) {
   wrap.append(hover, card, menu, bubble);
 
   let entityRe = null;
+  let excludeRe = null;
   let entityMap = new Map();
   let ghost = null;
   let slash = null;
@@ -120,9 +121,11 @@ export function attachAssist(ta, wrap) {
 
   function marked(text) {
     if (!entityRe || !highlightOn()) return esc(text);
+    const blocked = excludeRe ? [...text.matchAll(excludeRe)].map((m) => [m.index, m.index + m[0].length]) : [];
     let out = '';
     let last = 0;
     for (const m of text.matchAll(entityRe)) {
+      if (blocked.some(([a, b]) => m.index >= a && m.index < b)) continue;
       const e = entityMap.get(m[0]);
       out += esc(text.slice(last, m.index)) + `<mark class="ent k-${e.kind}" data-id="${e.id}">${esc(m[0])}</mark>`;
       last = m.index + m[0].length;
@@ -179,8 +182,11 @@ export function attachAssist(ta, wrap) {
     for (const e of store.entries || []) {
       for (const k of keywords(e)) if (k.length >= 2 && !entityMap.has(k)) entityMap.set(k, e);
     }
-    const keys = [...entityMap.keys()].sort((a, b) => b.length - a.length).map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const escape = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const keys = [...entityMap.keys()].sort((a, b) => b.length - a.length).map(escape);
     entityRe = keys.length ? new RegExp(keys.join('|'), 'g') : null;
+    const excludes = [...new Set((store.entries || []).flatMap((e) => (e.exclude || '').split(/[,，、;；/|\s]+/).map((x) => x.trim()).filter(Boolean)))];
+    excludeRe = excludes.length ? new RegExp(excludes.sort((a, b) => b.length - a.length).map(escape).join('|'), 'g') : null;
     render();
   }
 
@@ -592,6 +598,7 @@ export function attachAssist(ta, wrap) {
     bubble.innerHTML = '';
     bubble.append(
       btn('润色', () => run('polish', '润色')),
+      btn('校对', () => { hideBubble(); emit('ai-run', { task: 'proofread', selectionOnly: true }); }),
       btn('扩写', () => run('expand', '扩写')),
       btn('精简', () => run('shorten', '精简')),
       btn('改写…', async () => {

@@ -742,6 +742,18 @@ pub fn lint(text: &str, extra: &[String]) -> LintReport {
     LintReport { score: (100 - penalty).clamp(0, 100), stats, issues, ai_level: ai_level.into(), ai_density, ai_hits }
 }
 
+/// 敏感词命中转成文字检查的条目，严重度沿用词库等级
+pub fn sensitive_issues(text: &str, extra: &[String], ignore: &[String]) -> Vec<LintIssue> {
+    let map = Utf16Map::new(text);
+    crate::sensitive::scan(text, extra, ignore)
+        .into_iter()
+        .map(|h| {
+            let positions = h.spans.iter().map(|&(a, b)| [map.at(a), map.at(b)]).collect();
+            issue("敏感词", h.level, h.word, h.spans.len(), positions, &format!("{}：{}", h.category, h.suggestion))
+        })
+        .collect()
+}
+
 /// 给「技能修订」的检测摘要：AI 味等级和主要问题，严重的在前
 pub fn ai_brief(r: &LintReport) -> String {
     let mut lines = vec![format!("AI味：{}（每千字约 {:.1} 处套话和模板句）", r.ai_level, r.ai_density)];

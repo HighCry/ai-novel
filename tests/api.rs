@@ -586,6 +586,60 @@ async fn password_protection() {
 }
 
 #[tokio::test]
+async fn serial_publishing_and_local_checks() {
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let book = c.post("/api/books", json!({ "title": "连载", "update_target": 4000, "golden_finger": "梦潮" })).await;
+    let id = book["id"].as_i64().unwrap();
+    assert_eq!((book["update_target"].as_i64(), book["golden_finger"].as_str()), (Some(4000), Some("梦潮")));
+    let mut ids = vec![];
+    for i in 1..=3 {
+        let ch = c.post(&format!("/api/books/{id}/chapters"), json!({ "title": format!("第{i}章") })).await;
+        c.patch(&format!("/api/chapters/{}", ch["id"]), json!({ "content": "陈渊醒了，梦潮还在。".repeat(200) })).await;
+        ids.push(ch["id"].as_i64().unwrap());
+    }
+
+    let r = c.post(&format!("/api/books/{id}/publish"), json!({ "chapter_id": ids[1], "published": true })).await;
+    assert_eq!(r["changed"], 2, "第2章和前面的都标成已发布");
+    let words = c.get(&format!("/api/chapters/{}", ids[2])).await["word_count"].as_i64().unwrap();
+    let s = c.get(&format!("/api/books/{id}/stats")).await;
+    assert_eq!((s["published"].as_i64(), s["drafts"]["chapters"].as_i64(), s["drafts"]["words"].as_i64()), (Some(2), Some(1), Some(words)));
+    assert_eq!(s["drafts"]["days"].as_f64(), Some((words as f64 / 4000.0 * 10.0).floor() / 10.0));
+    let r = c.post(&format!("/api/books/{id}/publish"), json!({ "chapter_id": ids[1], "published": false })).await;
+    assert_eq!(r["changed"], 1, "从第2章起取消发布，第1章保留");
+
+    let order = |v: Value| v.as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>();
+    let original = c.get(&format!("/api/chapters/{}", ids[2])).await["content"].as_str().unwrap().to_string();
+    let at = original.encode_utf16().count() / 2;
+    let new = c.post(&format!("/api/chapters/{}/split", ids[2]), json!({ "at": at })).await;
+    let new_id = new["id"].as_i64().unwrap();
+    assert_eq!(order(c.get(&format!("/api/books/{id}/chapters")).await), vec![ids[0], ids[1], ids[2], new_id], "新章节紧跟在后面");
+    let head = c.get(&format!("/api/chapters/{}", ids[2])).await["content"].as_str().unwrap().to_string();
+    assert_eq!(format!("{head}{}", new["content"].as_str().unwrap()), original);
+    let merged = c.post(&format!("/api/chapters/{}/merge_next", ids[2]), json!({})).await;
+    assert_eq!(merged["content"].as_str().unwrap().replace('\n', ""), original);
+    assert_eq!(order(c.get(&format!("/api/books/{id}/chapters")).await), ids);
+    let notes: Vec<String> = c.get(&format!("/api/chapters/{}/versions", ids[2])).await.as_array().unwrap().iter().map(|v| v["note"].as_str().unwrap().to_string()).collect();
+    assert!(notes.iter().any(|n| n == "拆章前") && notes.iter().any(|n| n == "合并前") && notes.iter().any(|n| n.starts_with("合并进来的")), "{notes:?}");
+
+    let d = c.get(&format!("/api/books/{id}/declaration")).await;
+    let text = d["text"].as_str().unwrap();
+    assert!(text.contains("AI 辅助创作说明") && text.contains("没有使用 AI 工具"), "{text}");
+    let log = c.get(&format!("/api/books/{id}/creation_log")).await;
+    let md = log["markdown"].as_str().unwrap();
+    assert!(log["filename"].as_str().unwrap().ends_with("-创作过程记录.md"));
+    assert!(md.contains("## 各章创作过程") && md.contains("个（"), "合并、拆章留下的版本要算进修改历史：{md}");
+
+    let mut settings = c.get("/api/settings").await;
+    settings["sensitive_words"] = json!(["禁药=违禁丹药"]);
+    c.put("/api/settings", settings).await;
+    let report = c.post("/api/lint", json!({ "text": "他服下禁药，想看番外加群号：123456。" })).await;
+    let kinds: Vec<&str> = report["issues"].as_array().unwrap().iter().map(|i| i["kind"].as_str().unwrap()).collect();
+    assert_eq!(&kinds[..2], ["敏感词", "敏感词"], "敏感词排在最前面：{kinds:?}");
+    assert!(report["issues"].as_array().unwrap().iter().any(|i| i["text"] == "禁药" && i["suggestion"].as_str().unwrap().contains("违禁丹药")));
+}
+
+#[tokio::test]
 async fn writing_skills_flow() {
     let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
     let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };

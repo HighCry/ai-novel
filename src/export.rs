@@ -165,8 +165,9 @@ pub struct CheckItem {
 
 const LEFTOVER_PHRASES: [&str; 6] = ["好的，", "以下是", "作为AI", "作为一个AI", "（本章完）", "希望你喜欢"];
 
-/// 投稿前检查：空章、字数、标题、标点、超长段落、残留的 AI 回复语。
-pub fn submission_check(chapters: &[(Option<i64>, &Chapter)], min: i64, max: i64) -> Vec<CheckItem> {
+/// 投稿前检查：空章、字数、标题、标点、超长段落、残留的 AI 回复语、敏感词。
+/// sensitive 是设置里追加的敏感词和忽略的词。
+pub fn submission_check(chapters: &[(Option<i64>, &Chapter)], min: i64, max: i64, sensitive: (&[String], &[String])) -> Vec<CheckItem> {
     let mut out = Vec::new();
     for (n, ch) in chapters {
         let label = heading(*n, &ch.title, false);
@@ -206,6 +207,10 @@ pub fn submission_check(chapters: &[(Option<i64>, &Chapter)], min: i64, max: i64
             if head.contains(p) || tail.contains(p) {
                 push("warn", format!("开头或结尾疑似残留了 AI 回复语「{p}」"));
             }
+        }
+        for h in crate::sensitive::scan(&ch.content, sensitive.0, sensitive.1) {
+            let times = if h.spans.len() > 1 { format!("×{}", h.spans.len()) } else { String::new() };
+            push(if h.level == "high" { "error" } else { "warn" }, format!("敏感词「{}」{times}（{}）：{}", h.word, h.category, h.suggestion));
         }
     }
     out
@@ -260,13 +265,15 @@ mod tests {
 
     #[test]
     fn checks() {
-        let a = ch(1, "", "好的，以下是第一章。\n他走了,没回头。");
+        let a = ch(1, "", "好的，以下是第一章。\n他走了,没回头。想看后续加群号：12345。他吞下禁药。");
         let b = ch(2, "空", "");
-        let items = submission_check(&[(Some(1), &a), (Some(2), &b)], 2000, 6000);
+        let items = submission_check(&[(Some(1), &a), (Some(2), &b)], 2000, 6000, (&["禁药".into()], &[]));
         assert!(items.iter().any(|i| i.message.contains("少于 2000")));
         assert!(items.iter().any(|i| i.message.contains("没有章节标题")));
         assert!(items.iter().any(|i| i.message.contains("AI 回复语")));
         assert!(items.iter().any(|i| i.message.contains("半角标点")));
         assert!(items.iter().any(|i| i.chapter_id == 2 && i.level == "error"));
+        assert!(items.iter().any(|i| i.level == "error" && i.message.contains("敏感词「群号」")), "引流话术算严重问题");
+        assert!(items.iter().any(|i| i.level == "warn" && i.message.contains("敏感词「禁药」")), "自定义敏感词");
     }
 }
