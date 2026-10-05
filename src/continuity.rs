@@ -30,6 +30,13 @@ const LOW_TENSION: f64 = 4.0;
 const LOW_TENSION_STREAK: usize = 3;
 const NO_COOL_POINT_STREAK: usize = 5;
 const DEATH_WORDS: [&str; 7] = ["死亡", "已死", "身亡", "阵亡", "牺牲", "死了", "去世"];
+/// 死者名字所在的那句里有这些说法，写的是尸体、死讯或回忆，不算本人出场
+const REMAINS_WORDS: &[&str] = &[
+    "尸首", "尸体", "遗体", "尸身", "尸骨", "骸骨", "遗物", "遗言", "遗愿", "临死", "死前", "生前", "死后", "死了", "已死", "身亡", "遇害",
+    "回忆", "想起", "记起", "梦见", "灵位", "牌位", "坟",
+];
+/// 紧跟在死者名字后面，写的是他留下的东西
+const REMAINS_AFTER_NAME: &[&str] = &["的血", "的心头血", "那包", "那把", "那件", "那块", "那柄", "留下的"];
 
 pub(crate) fn finding(level: &str, kind: &str, message: String) -> Finding {
     Finding { level: level.into(), kind: kind.into(), message, chapter_id: None, entry_id: None, thread_id: None, reveal_id: None, quote: String::new() }
@@ -37,6 +44,23 @@ pub(crate) fn finding(level: &str, kind: &str, message: String) -> Finding {
 
 fn mentions(e: &Entry, text: &str) -> bool {
     e.keywords().iter().filter(|k| k.chars().count() >= 2 || **k == e.name.trim()).any(|k| text.contains(k.as_str()))
+}
+
+/// 死者在这段文字里真正出场的第一句（截断后的原文）：名字后面紧跟的不是他留下的东西，整句也没有尸体、死讯、回忆这类说法。
+fn appearance(e: &Entry, text: &str) -> Option<String> {
+    let mut hits: Vec<(usize, usize)> = e
+        .keywords()
+        .iter()
+        .filter(|k| k.chars().count() >= 2 || **k == e.name.trim())
+        .flat_map(|k| text.match_indices(k.as_str()).map(|(i, m)| (i, i + m.len())).collect::<Vec<_>>())
+        .collect();
+    hits.sort_unstable();
+    hits.into_iter()
+        .find(|&(start, end)| {
+            !REMAINS_AFTER_NAME.iter().any(|w| text[end..].starts_with(w))
+                && !REMAINS_WORDS.iter().any(|w| crate::logic::sentence_around(text, start).contains(w))
+        })
+        .map(|(start, _)| crate::logic::sentence_at(text, start))
 }
 
 fn is_dead(state: &str) -> bool {
@@ -123,10 +147,11 @@ pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
             None if is_dead(&vital(&e.fields, &e.state)) => current.into_iter().collect(),
             None => Vec::new(),
         };
-        if let Some(c) = after.into_iter().find(|c| mentions(e, &c.content)) {
+        if let Some((c, quote)) = after.into_iter().find_map(|c| appearance(e, &c.content).map(|q| (c, q))) {
             let mut f = finding("warn", "已死亡人物出场", format!("「{}」已经死亡，但在{}出现了，请确认是回忆、尸体还是复活", e.name, d.label(c)));
             f.entry_id = Some(e.id);
             f.chapter_id = Some(c.id);
+            f.quote = quote;
             out.push(f);
         }
     }
@@ -244,5 +269,24 @@ mod tests {
         assert!(kinds.contains(&"张力偏低"));
         assert!(!kinds.contains(&"爽点断档"), "只有 4 章没有爽点，不到阈值");
         assert!(found.iter().all(|f| !f.message.contains("林凡」已经")), "主角一直在出场");
+    }
+
+    #[test]
+    fn dead_character_remains_are_not_appearances() {
+        let person = |id: i64, name: &str| Entry { id, kind: "character".into(), name: name.into(), ..Default::default() };
+        let entries = vec![person(1, "徐平安"), person(2, "赵黑虎"), person(3, "王奎"), person(4, "赵陵")];
+        // 《大梦长生》第 3、5、9 章里的原句
+        let chapters = vec![
+            ch(1, "王奎、赵陵、徐平安、赵黑虎都在矿上。"),
+            ch(2, "镜面飞快地转，光斑扫过刑架上的徐平安和地上赵黑虎的尸首，又停在青黑巨石那道刺眼的断轨剑印上。"),
+            ch(3, "又从王奎那包避毒草叶里抽出几片，塞进回旋的风眼当作气闸。刀上还沾着赵陵的血，没有干透。赵陵死了，赵崇山跌了半境。"),
+            ch(4, "头顶上，赵陵心口迸出的那道血柱直贯夜空。"),
+        ];
+        let states = (1..=4).map(|id| EntryState { id, entry_id: id, chapter_id: Some(1), phase: "end".into(), state: "已死亡".into(), ..Default::default() }).collect();
+        let d = BookData::new(Book::default(), vec![], chapters, entries, vec![], states);
+        let dead: Vec<Finding> = check(&d, None).into_iter().filter(|f| f.kind == "已死亡人物出场").collect();
+        assert_eq!(dead.len(), 1, "尸首、遗物、血和死讯都不算出场：{dead:?}");
+        assert_eq!((dead[0].entry_id, dead[0].chapter_id), (Some(4), Some(4)));
+        assert_eq!(dead[0].quote, "头顶上，赵陵心口迸出的那道血柱直贯夜空。");
     }
 }

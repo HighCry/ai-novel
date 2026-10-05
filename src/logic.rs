@@ -57,11 +57,16 @@ fn first_hit(keys: &[String], text: &str) -> Option<(usize, String)> {
 
 const SENTENCE_END: [char; 6] = ['。', '！', '？', '!', '?', '\n'];
 
-/// 命中位置所在的句子。
-fn sentence_at(text: &str, pos: usize) -> String {
+/// 命中位置所在的整句，不截断。
+pub(crate) fn sentence_around(text: &str, pos: usize) -> &str {
     let start = text[..pos].rfind(SENTENCE_END).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
     let end = text[pos..].find(SENTENCE_END).map_or(text.len(), |i| pos + i + text[pos + i..].chars().next().map_or(1, char::len_utf8));
-    clip(text[start..end].trim(), 80)
+    text[start..end].trim()
+}
+
+/// 命中位置所在的句子，过长截断。
+pub(crate) fn sentence_at(text: &str, pos: usize) -> String {
+    clip(sentence_around(text, pos), 80)
 }
 
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
