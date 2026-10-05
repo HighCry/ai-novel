@@ -702,6 +702,23 @@ async fn visibility_red_line() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "开头没有标题的部分不能加标记");
 }
 
+/// 打印真实书稿某一章「写整章」的提示词，核对模型实际看到了什么。AI_NOVEL_CHECK_DB 指向数据库副本，AI_NOVEL_CHECK_CHAPTER 是章节 id（默认第一本书的第一章）。
+/// AI_NOVEL_CHECK_DB=副本路径 cargo test --test api real_book_prompt -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn real_book_prompt() {
+    let Some(path) = std::env::var_os("AI_NOVEL_CHECK_DB") else { return };
+    let db = Db::open(std::path::Path::new(&path)).unwrap();
+    let book = db.list_books().unwrap()[0].id;
+    let chapter = std::env::var("AI_NOVEL_CHECK_CHAPTER").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or_else(|| db.list_chapters(book).unwrap()[0].id);
+    let addr = spawn(build_router(AppState::new(db, None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let pv = c.post("/api/ai/preview", json!({ "task": "write_chapter", "book_id": book, "chapter_id": chapter })).await;
+    for m in pv["messages"].as_array().unwrap() {
+        println!("===== {} =====\n{}", m["role"], m["content"].as_str().unwrap());
+    }
+}
+
 /// 拿真实书稿跑一遍体检，看规则检查在实际稿子上报了什么。AI_NOVEL_CHECK_DB 指向一份数据库副本（打开时会升级表结构，别指向正在用的库）。
 /// AI_NOVEL_CHECK_DB=副本路径 cargo test --test api real_book_checks -- --ignored --nocapture
 #[test]

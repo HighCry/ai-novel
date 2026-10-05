@@ -40,12 +40,20 @@ fn is_dead(state: &str) -> bool {
     DEATH_WORDS.iter().any(|w| state.contains(w))
 }
 
-/// 人物自己是死是活只看身体、实力、位置；「知道的秘密」「近期经历」里常写别人的死，不能算到他头上。
+/// 人物自己是死是活只看身体、实力、位置，并去掉引号里转述的话；「知道的秘密」「近期经历」和别人的议论里常写别人的死，不能算到他头上。
 fn vital(fields: &std::collections::BTreeMap<String, String>, state: &str) -> String {
-    if fields.is_empty() {
-        return state.to_string();
+    let text = if fields.is_empty() { state.to_string() } else { ["body", "power", "location"].iter().filter_map(|k| fields.get(*k)).cloned().collect::<Vec<_>>().join("；") };
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '「' | '“' | '『' => depth += 1,
+            '」' | '”' | '』' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
     }
-    ["body", "power", "location"].iter().filter_map(|k| fields.get(*k)).cloned().collect::<Vec<_>>().join("；")
+    out
 }
 
 pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
@@ -206,7 +214,13 @@ mod tests {
             Entry { id: 2, kind: "character".into(), name: "苏雨".into(), role: "重要配角".into(), ..Default::default() },
             Entry { id: 3, kind: "character".into(), name: "张三".into(), ..Default::default() },
         ];
-        let knows_death = [("knows".to_string(), "知道张三已死亡".to_string()), ("body".to_string(), "无伤".to_string())].into_iter().collect();
+        let knows_death = [
+            ("knows".to_string(), "知道张三已死亡".to_string()),
+            ("body".to_string(), "无伤".to_string()),
+            ("power".to_string(), "炼气五层（旁人议论他「死了师父，境界跌了」）".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let states = vec![
             EntryState { id: 1, entry_id: 3, chapter_id: Some(2), phase: "end".into(), state: "被林凡所杀，已死亡".into(), ..Default::default() },
             EntryState { id: 2, entry_id: 1, chapter_id: Some(2), phase: "end".into(), fields: knows_death, ..Default::default() },
