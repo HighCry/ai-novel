@@ -278,7 +278,31 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_book ON events(book_id);
 "#;
 
-const MIGRATIONS: [&str; 8] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9];
+const SCHEMA_V10: &str = r#"
+CREATE TABLE IF NOT EXISTS refbooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT '',
+  genre TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS refchapters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ref_id INTEGER NOT NULL REFERENCES refbooks(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  word_count INTEGER NOT NULL DEFAULT 0,
+  stats TEXT NOT NULL DEFAULT '',
+  analysis TEXT NOT NULL DEFAULT '',
+  analyzed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_refchapters ON refchapters(ref_id, seq);
+"#;
+
+const MIGRATIONS: [&str; 9] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10];
 
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
@@ -445,6 +469,35 @@ fn chapter_row(r: &Row) -> rusqlite::Result<Chapter> {
         published_at: r.get(15)?,
         story_time: r.get(16)?,
         story_day: r.get(17)?,
+    })
+}
+
+fn refbook_row(r: &Row) -> rusqlite::Result<RefBook> {
+    Ok(RefBook {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        author: r.get(2)?,
+        genre: r.get(3)?,
+        note: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+        chapters: r.get(7)?,
+        words: r.get(8)?,
+        analyzed: r.get(9)?,
+    })
+}
+
+fn refchapter_row(r: &Row) -> rusqlite::Result<RefChapter> {
+    Ok(RefChapter {
+        id: r.get(0)?,
+        ref_id: r.get(1)?,
+        seq: r.get(2)?,
+        title: r.get(3)?,
+        content: r.get(4)?,
+        word_count: r.get(5)?,
+        stats: json_value(r.get(6)?),
+        analysis: json_value(r.get(7)?),
+        analyzed_at: r.get(8)?,
     })
 }
 
@@ -1434,6 +1487,82 @@ impl Db {
             "INSERT INTO entry_states (entry_id, chapter_id, phase, state, fields, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![entry_id, chapter_id, phase, state, map_json(fields), now()],
         )?;
+        Ok(())
+    }
+
+    // ---------- 拆书：对标作品 ----------
+
+    /// 新建对标作品和它的章节（一个事务）
+    pub fn create_refbook(&self, b: &RefBook, chapters: &[RefChapter]) -> Result<i64> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let t = now();
+        tx.execute(
+            "INSERT INTO refbooks (title, author, genre, note, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![b.title.trim(), b.author.trim(), b.genre.trim(), b.note.trim(), t],
+        )?;
+        let id = tx.last_insert_rowid();
+        for (i, ch) in chapters.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO refchapters (ref_id, seq, title, content, word_count, stats) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, i as i64 + 1, ch.title.trim(), ch.content, count_words(&ch.content), value_json(&ch.stats)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn list_refbooks(&self) -> Result<Vec<RefBook>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT b.id, b.title, b.author, b.genre, b.note, b.created_at, b.updated_at,
+                    COUNT(ch.id), COALESCE(SUM(ch.word_count), 0), COUNT(ch.analyzed_at)
+             FROM refbooks b LEFT JOIN refchapters ch ON ch.ref_id = b.id
+             GROUP BY b.id ORDER BY b.updated_at DESC",
+        )?;
+        let rows = st.query_map([], refbook_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_refbook(&self, id: i64) -> Result<Option<RefBook>> {
+        Ok(self.list_refbooks()?.into_iter().find(|b| b.id == id))
+    }
+
+    pub fn update_refbook(&self, b: &RefBook) -> Result<()> {
+        self.c().execute(
+            "UPDATE refbooks SET title = ?2, author = ?3, genre = ?4, note = ?5, updated_at = ?6 WHERE id = ?1",
+            params![b.id, b.title.trim(), b.author.trim(), b.genre.trim(), b.note.trim(), now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_refbook(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM refbooks WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// 对标作品的章节；with_content 为 false 时不带正文
+    pub fn list_refchapters(&self, ref_id: i64, with_content: bool) -> Result<Vec<RefChapter>> {
+        let c = self.c();
+        let content = if with_content { "content" } else { "''" };
+        let mut st = c.prepare(&format!(
+            "SELECT id, ref_id, seq, title, {content}, word_count, stats, analysis, analyzed_at FROM refchapters WHERE ref_id = ?1 ORDER BY seq"
+        ))?;
+        let rows = st.query_map([ref_id], refchapter_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_refchapter(&self, id: i64) -> Result<Option<RefChapter>> {
+        Ok(self
+            .c()
+            .query_row("SELECT id, ref_id, seq, title, content, word_count, stats, analysis, analyzed_at FROM refchapters WHERE id = ?1", [id], refchapter_row)
+            .optional()?)
+    }
+
+    pub fn set_refchapter_analysis(&self, id: i64, analysis: &serde_json::Value) -> Result<()> {
+        let c = self.c();
+        c.execute("UPDATE refchapters SET analysis = ?2, analyzed_at = ?3 WHERE id = ?1", params![id, value_json(analysis), now()])?;
+        c.execute("UPDATE refbooks SET updated_at = ?2 WHERE id = (SELECT ref_id FROM refchapters WHERE id = ?1)", params![id, now()])?;
         Ok(())
     }
 

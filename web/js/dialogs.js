@@ -5,6 +5,7 @@ import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
 import { openReveals, progressionEditor, revealReview } from './reveals.js';
 import { openTimeline } from './timeline.js';
+import { openTeardown } from './teardown.js';
 
 let genreProfiles = null;
 export async function loadGenres() {
@@ -594,7 +595,8 @@ export async function openStats() {
               h('div', { class: 'tension-bar ' + (t >= 7 ? 'good' : t >= 4 ? 'mid' : 'bad'), style: { height: t * 10 + '%' } }),
               h('div', { class: 'tension-label' }, c.number ?? '·'));
           })),
-          h('p', { class: 'hint' }, '每根柱子是一章，定稿时自动打分；连续几章偏低（黄、红）容易流失读者。点击柱子跳到对应章节。'))
+          h('p', { class: 'hint' }, '每根柱子是一章，定稿时自动打分；连续几章偏低（黄、红）容易流失读者。点击柱子跳到对应章节。',
+            h('a', { href: '#', onclick: (e) => { e.preventDefault(); openTeardown(); } }, '和对标作品比一比')))
         : h('div', { class: 'empty' }, '还没有数据。章节定稿时会顺带分析张力、爽点和章末钩子。'),
       h('h4', null, 'AI 使用记录'),
       h('p', { class: 'small' },
@@ -1542,6 +1544,7 @@ export function openPalette() {
     ['导出', () => openExport()],
     ['全书查找替换（Ctrl+H）', () => openReplace({ find: store.editor?.selection().text.trim() || '' })],
     ['时间线和时限', () => openTimeline()],
+    ['拆书对标', () => openTeardown()],
     ['统计', () => openStats()],
     ['写作手册', () => openHandbook()],
     ['提示词模板', () => openPrompts()],

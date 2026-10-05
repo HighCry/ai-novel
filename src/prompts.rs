@@ -155,6 +155,24 @@ const POLISH: &str = "{{context}}
 请润色【需要处理的段落】：修正病句、错别字和不通顺的地方，删掉套话和 AI 腔（解释腔、上帝视角、弱化副词堆砌、三连排比、段尾感悟），让节奏更紧凑；只做必要的修改，不改情节，不改人物的说话风格。{{instruction_block}}
 只输出处理后的段落，不要输出前文和后文，不要解释。";
 
+const TEARDOWN: &str = "下面是一部网文对标作品的一章。请拆解它的结构和手法，供作者学习“怎么写”：只描述写法，不评价好坏，不摘抄原文。
+
+【{{chapter}}】
+{{content}}
+
+只输出 JSON，格式：
+{\"summary\":\"一两句话概括本章发生了什么，用你自己的话\",
+ \"opening\":\"开头怎么切入：动作/对话/悬念/冲突/环境/回顾，再用一句话说明\",
+ \"tension\":7,
+ \"emotion\":\"情绪基调\",
+ \"cool_points\":[{\"type\":\"打脸/升级/收获/反转/装逼/揭秘/逆袭/被认可等\",\"level\":\"小/中/大\",\"pos\":\"开头/中段/结尾\"}],
+ \"hook\":{\"type\":\"悬念/危机/反转/期待/情感/无\",\"desc\":\"章末怎么吊住读者，概括手法\"},
+ \"info\":\"信息密度：高/中/低，以及新信息主要是设定、人物还是剧情\",
+ \"new_elements\":[\"本章第一次登场的人物、势力、物品或设定，只写名称\"],
+ \"techniques\":[\"值得学的写法，每条一句话，如：先压后扬，配角先嘲讽再被打脸\"]}
+tension 是 0～10 的整数，按读者有多想马上看下一章来打；没有爽点就给空数组，章末没有钩子 hook.type 写“无”。
+所有字段都用你自己的话概括，不要引用原文句子。";
+
 const PROOFREAD: &str = "{{before_block}}
 
 【需要校对的正文】
@@ -661,6 +679,14 @@ pub const TEMPLATES: &[Template] = &[
             V_INSTRUCTION,
         ],
         text: REVEAL_PLAN,
+    },
+    Template {
+        id: "task.teardown",
+        name: "拆书分析",
+        group: "分析",
+        description: "拆解对标作品的一章：开头、张力、爽点、章末钩子、信息密度和值得学的写法（只学结构，不进写作提示词）",
+        vars: &[V_CHAPTER, V_CONTENT],
+        text: TEARDOWN,
     },
     Template { id: "task.check", name: "一致性检查", group: "分析", description: "核对本章和设定、前情是否矛盾", vars: &[V_CONTEXT, V_CHAPTER, V_CONTENT], text: CHECK },
     Template {

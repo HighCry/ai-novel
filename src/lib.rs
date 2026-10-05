@@ -3,6 +3,7 @@ pub mod api;
 pub mod backup;
 pub mod declare;
 pub mod replace;
+pub mod teardown;
 pub mod timeline;
 pub mod continuity;
 pub mod db;
@@ -58,6 +59,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/books/{id}/timeline", get(timeline::get_timeline))
         .route("/books/{id}/events", post(timeline::create_event))
         .route("/events/{id}", patch(timeline::patch_event).delete(timeline::delete_event))
+        .route("/refbooks", get(teardown::list))
+        .route("/refbooks/import", post(teardown::import))
+        .route("/refbooks/{id}", get(teardown::get).patch(teardown::patch).delete(teardown::delete))
+        .route("/refbooks/{id}/compare", get(teardown::compare))
+        .route("/refchapters/{id}/analyze", post(teardown::analyze))
         .route("/books/{id}/volumes", get(list_volumes).post(create_volume))
         .route("/volumes/{id}", patch(patch_volume).delete(delete_volume))
         .route("/books/{id}/chapters", get(list_chapters).post(create_chapter))

@@ -95,16 +95,21 @@ pub struct ImportRequest {
     pub genre: Option<String>,
 }
 
-pub async fn import_novel(State(st): State<AppState>, Json(r): Json<ImportRequest>) -> ApiResult<Value> {
-    let bytes = importer::decode_base64(&r.data).map_err(|e| bad_request(e.to_string()))?;
-    let lower = r.filename.to_lowercase();
-    let text = if lower.ends_with(".docx") {
+/// 上传的文件（base64）转成文字：docx、epub 取正文，其余按文本识别编码
+pub fn file_text(filename: &str, data: &str) -> Result<String, AppError> {
+    let bytes = importer::decode_base64(data).map_err(|e| bad_request(e.to_string()))?;
+    let lower = filename.to_lowercase();
+    Ok(if lower.ends_with(".docx") {
         importer::docx_to_text(&bytes).map_err(|e| bad_request(format!("{e:#}")))?
     } else if lower.ends_with(".epub") {
         importer::epub_to_text(&bytes).map_err(|e| bad_request(format!("{e:#}")))?
     } else {
         importer::decode_text(&bytes)
-    };
+    })
+}
+
+pub async fn import_novel(State(st): State<AppState>, Json(r): Json<ImportRequest>) -> ApiResult<Value> {
+    let text = file_text(&r.filename, &r.data)?;
     let (preface, parsed) = split_chapters(&text);
     if parsed.is_empty() {
         return Err(bad_request("没有识别到正文内容"));

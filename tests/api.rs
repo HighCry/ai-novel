@@ -415,6 +415,27 @@ async fn full_writing_flow() {
     assert_eq!(metas[0]["id"], ch2_id);
     assert_eq!(metas[0]["number"], 1);
 
+    // 拆书：导入对标作品，本地统计，AI 拆解一章，再和自己的书对比
+    let src = "第1章 退婚\n萧炎站在广场上，四周都是嘲笑声。\n“三十年河东，三十年河西！”\n第2章 斗气\n他回到后山，重新开始修炼。\n第3章 拍卖\n拍卖会开始了。";
+    let rb = c.post("/api/refbooks/import", json!({ "filename": "《斗破》.txt", "data": format!("data:text/plain;base64,{}", b64(src.as_bytes())) })).await;
+    assert_eq!((rb["title"].as_str(), rb["chapters"].as_i64(), rb["analyzed"].as_i64()), (Some("斗破"), Some(3), Some(0)));
+    let rid = rb["id"].as_i64().unwrap();
+    let detail = c.get(&format!("/api/refbooks/{rid}")).await;
+    let first = detail["chapters"][0].clone();
+    assert_eq!(first["label"], "第1章 退婚");
+    assert!(first["stats"]["dialogue"].as_f64().unwrap() > 0.0 && first.get("content").is_none(), "{first}");
+    let analysis = c.post(&format!("/api/refchapters/{}/analyze", first["id"]), json!({})).await;
+    assert_eq!((analysis["tension"].as_i64(), analysis["hook"]["type"].as_str()), (Some(7), Some("悬念预知")));
+    let prompt = seen.lock().unwrap().last().unwrap()["messages"].to_string();
+    assert!(prompt.contains("拆解它的结构和手法") && prompt.contains("萧炎站在广场上"), "{prompt}");
+    let cmp = c.get(&format!("/api/refbooks/{rid}/compare?book_id={bid}")).await;
+    assert_eq!((cmp["ref"]["chapters"].as_u64(), cmp["ref"]["analyzed"].as_u64(), cmp["book_title"].as_str()), (Some(3), Some(1), Some("测试之书")));
+    assert!(cmp["mine"]["chapters"].as_u64().unwrap() > 0 && !cmp["notes"].as_array().unwrap().is_empty(), "{cmp}");
+    let writing = c.post("/api/ai/preview", json!({ "task": "write_chapter", "book_id": bid, "chapter_id": ch3_id })).await;
+    assert!(!writing.to_string().contains("萧炎"), "对标作品的原文不进写作提示词");
+    c.ok(reqwest::Method::DELETE, &format!("/api/refbooks/{rid}"), None).await;
+    assert_eq!(c.get("/api/refbooks").await.as_array().unwrap().len(), 0);
+
     let books = c.get("/api/books").await;
     assert_eq!(books.as_array().unwrap().len(), 2);
     c.ok(reqwest::Method::DELETE, &format!("/api/books/{bid}"), None).await;

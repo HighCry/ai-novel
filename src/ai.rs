@@ -99,6 +99,9 @@ type Vars = HashMap<&'static str, String>;
 /// 所有 JSON 任务都追加这条，作者改过模板也能保证格式（中文模型常在字符串里用英文引号）。
 pub const JSON_RULE: &str = "\n\n输出格式要求：只输出一个合法的 JSON 对象，不要加任何说明文字；JSON 字符串内部需要引号时用「」或“”，不要用英文双引号。";
 
+/// 拆书时每章最多发给模型的字数
+const TEARDOWN_CHARS: usize = 9000;
+
 const PROOFREADER: &str = "你是严谨的中文校对编辑，熟悉网络小说。你只改正文字硬伤：错别字、明显的病句和标点错误；不评价、不润色、不改写作者的表达。";
 
 /// 会带上文风指南和范文参考的写正文任务
@@ -217,6 +220,15 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
         Prepared { role, messages: vec![Message::system(system), Message::user(user)], json }
     };
     match task {
+        "teardown" => {
+            if req.selection.trim().is_empty() {
+                return Err(bad_request("这一章没有正文"));
+            }
+            let mut v = Vars::new();
+            v.insert("chapter", req.instruction.trim().to_string());
+            v.insert("content", clip(&req.selection, TEARDOWN_CHARS));
+            Ok(prepared(Role::Analyst, editor_system("", ov), "task.teardown", &v, true))
+        }
         "proofread" => {
             let d = need(data)?;
             if req.selection.trim().is_empty() {
@@ -1117,6 +1129,13 @@ pub async fn complete_text(st: &AppState, settings: &Settings, prep: Prepared, r
     let out = st.llm.chat(&provider, &chat).await.map_err(upstream)?;
     log_usage(&st.db, req, &chat.model, input_chars(&chat.messages), &out.text, out.usage);
     Ok(clean_plain(&out.text))
+}
+
+/// 不经过网页的 JSON 任务（拆书分析）：组装提示词、调用模型、解析 JSON，并记下用量
+pub async fn run_json(st: &AppState, req: &AiRequest) -> Result<Value, AppError> {
+    let (settings, parts, _) = prepare_request(st, req).await?;
+    let Ok([prep]) = <[Prepared; 1]>::try_from(parts) else { return Err(bad_request("这个任务只能用流式接口")) };
+    complete_json(st, &settings, prep, req).await
 }
 
 pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -> ApiResult<Value> {

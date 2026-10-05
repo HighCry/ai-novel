@@ -121,6 +121,40 @@ pub struct ChapterMeta {
     pub story_day: Option<i64>,
 }
 
+/// 拆书用的对标作品：和作者自己的书分开存，原文只用来分析结构，不进写作提示词
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RefBook {
+    pub id: i64,
+    pub title: String,
+    pub author: String,
+    pub genre: String,
+    pub note: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// 下面三项是统计出来的：章数、总字数、已做 AI 分析的章数
+    pub chapters: i64,
+    pub words: i64,
+    pub analyzed: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RefChapter {
+    pub id: i64,
+    pub ref_id: i64,
+    pub seq: i64,
+    pub title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub content: String,
+    pub word_count: i64,
+    /// 本地统计：字数、段落、对话占比、句长
+    pub stats: Value,
+    /// AI 拆解：开头、张力、爽点、钩子、信息密度、手法
+    pub analysis: Value,
+    pub analyzed_at: Option<i64>,
+}
+
 /// 时间线上的一件事：本章发生的关键事件，或正文里定下的时限（三日内交出灵铁、七天后宗门大比）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
