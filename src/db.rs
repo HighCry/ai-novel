@@ -207,6 +207,49 @@ ALTER TABLE entries ADD COLUMN visibility TEXT NOT NULL DEFAULT '';
 ALTER TABLE entries ADD COLUMN secret TEXT NOT NULL DEFAULT '';
 "#;
 
+const SCHEMA_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS reveals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  truth TEXT NOT NULL DEFAULT '',
+  misread TEXT NOT NULL DEFAULT '',
+  gap TEXT NOT NULL DEFAULT '',
+  terms TEXT NOT NULL DEFAULT '',
+  exceptions TEXT NOT NULL DEFAULT '',
+  entry_ids TEXT NOT NULL DEFAULT '',
+  seed_at INTEGER,
+  clue_at INTEGER,
+  reveal_at INTEGER,
+  seed_note TEXT NOT NULL DEFAULT '',
+  clue_note TEXT NOT NULL DEFAULT '',
+  payoff TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  sort INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reveals_book ON reveals(book_id);
+CREATE TABLE IF NOT EXISTS reveal_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reveal_id INTEGER NOT NULL REFERENCES reveals(id) ON DELETE CASCADE,
+  chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  step TEXT NOT NULL DEFAULT 'clue',
+  quote TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reveal_events ON reveal_events(reveal_id);
+CREATE TABLE IF NOT EXISTS progressions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  gate TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'add',
+  text TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_progressions ON progressions(entry_id);
+"#;
+
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
 fn lib_item_row(r: &Row) -> rusqlite::Result<LibItem> {
@@ -401,6 +444,40 @@ fn thread_row(r: &Row) -> rusqlite::Result<Thread> {
     })
 }
 
+const REVEAL_COLS: &str = "id, book_id, title, truth, misread, gap, terms, exceptions, entry_ids, seed_at, clue_at, reveal_at, seed_note, clue_note, payoff, status, sort, updated_at";
+
+fn reveal_row(r: &Row) -> rusqlite::Result<Reveal> {
+    let ids: String = r.get(8)?;
+    Ok(Reveal {
+        id: r.get(0)?,
+        book_id: r.get(1)?,
+        title: r.get(2)?,
+        truth: r.get(3)?,
+        misread: r.get(4)?,
+        gap: r.get(5)?,
+        terms: r.get(6)?,
+        exceptions: r.get(7)?,
+        entry_ids: serde_json::from_str(&ids).unwrap_or_default(),
+        seed_at: r.get(9)?,
+        clue_at: r.get(10)?,
+        reveal_at: r.get(11)?,
+        seed_note: r.get(12)?,
+        clue_note: r.get(13)?,
+        payoff: r.get(14)?,
+        status: r.get(15)?,
+        sort: r.get(16)?,
+        updated_at: r.get(17)?,
+    })
+}
+
+fn reveal_event_row(r: &Row) -> rusqlite::Result<RevealEvent> {
+    Ok(RevealEvent { id: r.get(0)?, reveal_id: r.get(1)?, chapter_id: r.get(2)?, step: r.get(3)?, quote: r.get(4)?, note: r.get(5)?, created_at: r.get(6)? })
+}
+
+fn progression_row(r: &Row) -> rusqlite::Result<Progression> {
+    Ok(Progression { id: r.get(0)?, entry_id: r.get(1)?, gate: r.get(2)?, mode: r.get(3)?, text: r.get(4)?, created_at: r.get(5)? })
+}
+
 fn state_row(r: &Row) -> rusqlite::Result<EntryState> {
     Ok(EntryState {
         id: r.get(0)?,
@@ -451,6 +528,9 @@ impl Db {
         }
         if version < 6 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
+        }
+        if version < 7 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
         }
         Ok(Self { conn: Arc::new(Mutex::new(conn)), lib_rev: Arc::new(AtomicU64::new(1)) })
     }
@@ -1210,6 +1290,136 @@ impl Db {
 
     pub fn delete_entry_state(&self, id: i64) -> Result<()> {
         self.c().execute("DELETE FROM entry_states WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ---------- 设定进展 ----------
+
+    pub fn list_book_progressions(&self, book_id: i64) -> Result<Vec<Progression>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT p.id, p.entry_id, p.gate, p.mode, p.text, p.created_at FROM progressions p JOIN entries e ON e.id = p.entry_id WHERE e.book_id = ?1 ORDER BY p.id",
+        )?;
+        let rows = st.query_map([book_id], progression_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_entry_progressions(&self, entry_id: i64) -> Result<Vec<Progression>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id, entry_id, gate, mode, text, created_at FROM progressions WHERE entry_id = ?1 ORDER BY id")?;
+        let rows = st.query_map([entry_id], progression_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_progression(&self, id: i64) -> Result<Option<Progression>> {
+        Ok(self
+            .c()
+            .query_row("SELECT id, entry_id, gate, mode, text, created_at FROM progressions WHERE id = ?1", [id], progression_row)
+            .optional()?)
+    }
+
+    pub fn save_progression(&self, p: &Progression) -> Result<Progression> {
+        let mode = if p.mode == "replace" { "replace" } else { "add" };
+        let id = {
+            let c = self.c();
+            if p.id > 0 {
+                c.execute("UPDATE progressions SET gate = ?2, mode = ?3, text = ?4 WHERE id = ?1", params![p.id, p.gate.trim(), mode, p.text.trim()])?;
+                p.id
+            } else {
+                c.execute(
+                    "INSERT INTO progressions (entry_id, gate, mode, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![p.entry_id, p.gate.trim(), mode, p.text.trim(), now()],
+                )?;
+                c.last_insert_rowid()
+            }
+        };
+        Ok(self.get_progression(id)?.expect("刚保存的设定进展"))
+    }
+
+    pub fn delete_progression(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM progressions WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ---------- 秘密台账 ----------
+
+    pub fn list_reveals(&self, book_id: i64) -> Result<Vec<Reveal>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT {REVEAL_COLS} FROM reveals WHERE book_id = ?1 ORDER BY CASE status WHEN 'dropped' THEN 1 ELSE 0 END, COALESCE(reveal_at, 1000000000), sort, id"
+        ))?;
+        let rows = st.query_map([book_id], reveal_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_reveal(&self, id: i64) -> Result<Option<Reveal>> {
+        let sql = format!("SELECT {REVEAL_COLS} FROM reveals WHERE id = ?1");
+        Ok(self.c().query_row(&sql, [id], reveal_row).optional()?)
+    }
+
+    /// 新建（id 为 0）或更新一条秘密。
+    pub fn save_reveal(&self, r: &Reveal) -> Result<Reveal> {
+        let status = if r.status == "dropped" { "dropped" } else { "active" };
+        let ids = if r.entry_ids.is_empty() { String::new() } else { serde_json::to_string(&r.entry_ids)? };
+        let id = {
+            let c = self.c();
+            if r.id > 0 {
+                c.execute(
+                    "UPDATE reveals SET title = ?2, truth = ?3, misread = ?4, gap = ?5, terms = ?6, exceptions = ?7, entry_ids = ?8, seed_at = ?9, clue_at = ?10,
+                     reveal_at = ?11, seed_note = ?12, clue_note = ?13, payoff = ?14, status = ?15, sort = ?16, updated_at = ?17 WHERE id = ?1",
+                    params![
+                        r.id, r.title.trim(), r.truth, r.misread, r.gap.trim(), r.terms.trim(), r.exceptions.trim(), ids, r.seed_at, r.clue_at,
+                        r.reveal_at, r.seed_note, r.clue_note, r.payoff, status, r.sort, now()
+                    ],
+                )?;
+                r.id
+            } else {
+                c.execute(
+                    "INSERT INTO reveals (book_id, title, truth, misread, gap, terms, exceptions, entry_ids, seed_at, clue_at, reveal_at, seed_note, clue_note, payoff, status, sort, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    params![
+                        r.book_id, r.title.trim(), r.truth, r.misread, r.gap.trim(), r.terms.trim(), r.exceptions.trim(), ids, r.seed_at, r.clue_at,
+                        r.reveal_at, r.seed_note, r.clue_note, r.payoff, status, r.sort, now()
+                    ],
+                )?;
+                c.last_insert_rowid()
+            }
+        };
+        Ok(self.get_reveal(id)?.expect("刚保存的秘密"))
+    }
+
+    pub fn delete_reveal(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM reveals WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn delete_book_reveals(&self, book_id: i64) -> Result<usize> {
+        Ok(self.c().execute("DELETE FROM reveals WHERE book_id = ?1", [book_id])?)
+    }
+
+    pub fn list_book_reveal_events(&self, book_id: i64) -> Result<Vec<RevealEvent>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT e.id, e.reveal_id, e.chapter_id, e.step, e.quote, e.note, e.created_at FROM reveal_events e JOIN reveals r ON r.id = e.reveal_id
+             WHERE r.book_id = ?1 ORDER BY e.id",
+        )?;
+        let rows = st.query_map([book_id], reveal_event_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 记一步揭示进度；同一章对同一个秘密的同一步只留最新一条。
+    pub fn add_reveal_event(&self, e: &RevealEvent) -> Result<i64> {
+        let c = self.c();
+        c.execute("DELETE FROM reveal_events WHERE reveal_id = ?1 AND chapter_id = ?2 AND step = ?3", params![e.reveal_id, e.chapter_id, e.step])?;
+        c.execute(
+            "INSERT INTO reveal_events (reveal_id, chapter_id, step, quote, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![e.reveal_id, e.chapter_id, e.step, e.quote.trim(), e.note.trim(), now()],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    pub fn delete_reveal_event(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM reveal_events WHERE id = ?1", [id])?;
         Ok(())
     }
 

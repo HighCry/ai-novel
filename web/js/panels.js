@@ -2,6 +2,7 @@ import { api, stream } from './api.js';
 import { store, on, emit, scope, chapterLabel, modelReady } from './store.js';
 import { h, toast, busy, cleanAi, copyText, countWords, KIND, keywords, diffClauses, applyDiff } from './ui.js';
 import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations, openSkills } from './dialogs.js';
+import { openReveals, openRevealEditor } from './reveals.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
 const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味' };
@@ -438,6 +439,7 @@ function checkPanel(body) {
   body.append(
     h('div', { class: 'btn-col' },
       h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, () => runContinuity(out), '体检中…') }, '连续性体检：伏笔、人物缺席、节奏（本地，免费）'),
+      h('button', { class: 'btn', onclick: () => openReveals() }, '信息节奏：秘密什么时候埋种子、给线索、揭开'),
       h('button', { class: 'btn', onclick: needChapter(runLint) }, '文字质量：套话、AI 腔、跨章重复（本地，免费）'),
       h('button', { class: 'btn', onclick: needChapter(runConsistency) }, '设定一致性检查（AI）'),
       h('button', { class: 'btn', onclick: needChapter(runReview) }, '编辑审稿打分（AI）'),
@@ -465,12 +467,20 @@ async function runContinuity(out) {
   if (!store.entries.some((e) => e.visibility)) {
     out.append(h('p', { class: 'hint' }, '给后期才登场或揭晓的设定设上可见性（编辑设定 → 可见性），体检就能查出提前写出来的地方。'));
   }
+  if (!list.some((f) => f.reveal_id)) {
+    out.append(h('p', { class: 'hint' }, '做一份揭示计划（上面的「信息节奏」），体检还会查泄露词提前出现、线索断档、揭开前没唤醒和揭示逾期。'));
+  }
+  const openReveal = async (id) => {
+    const r = (await api.get(`/books/${store.book.id}/reveals`)).reveals.find((x) => x.id === id);
+    if (r) openRevealEditor(r);
+  };
   for (const f of list) {
     const target = async () => {
       if (f.chapter_id) {
         await store.editor.open(f.chapter_id);
         if (f.quote) locate(f.quote.replace(/……$/, ''));
-      } else if (f.entry_id) { const e = store.entries.find((x) => x.id === f.entry_id); if (e) openEntry(e); } else if (f.thread_id) { const t = store.threads.find((x) => x.id === f.thread_id); if (t) openThread(t); }
+      } else if (f.reveal_id) openReveal(f.reveal_id);
+      else if (f.entry_id) { const e = store.entries.find((x) => x.id === f.entry_id); if (e) openEntry(e); } else if (f.thread_id) { const t = store.threads.find((x) => x.id === f.thread_id); if (t) openThread(t); }
     };
     out.append(h('div', { class: 'issue clickable ' + (f.level === 'critical' ? 'high' : f.level === 'warn' ? 'medium' : 'low'), onclick: target },
       h('div', { class: 'issue-head' }, h('span', { class: 'tag' }, f.kind)),

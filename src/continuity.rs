@@ -14,6 +14,9 @@ pub struct Finding {
     pub chapter_id: Option<i64>,
     pub entry_id: Option<i64>,
     pub thread_id: Option<i64>,
+    /// 揭示计划里的秘密
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reveal_id: Option<i64>,
     /// 原文依据：规则检查找到的那一句
     #[serde(skip_serializing_if = "String::is_empty")]
     pub quote: String,
@@ -29,7 +32,7 @@ const NO_COOL_POINT_STREAK: usize = 5;
 const DEATH_WORDS: [&str; 7] = ["死亡", "已死", "身亡", "阵亡", "牺牲", "死了", "去世"];
 
 pub(crate) fn finding(level: &str, kind: &str, message: String) -> Finding {
-    Finding { level: level.into(), kind: kind.into(), message, chapter_id: None, entry_id: None, thread_id: None, quote: String::new() }
+    Finding { level: level.into(), kind: kind.into(), message, chapter_id: None, entry_id: None, thread_id: None, reveal_id: None, quote: String::new() }
 }
 
 fn mentions(e: &Entry, text: &str) -> bool {

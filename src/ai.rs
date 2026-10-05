@@ -1,10 +1,10 @@
 //! AI 任务：根据任务类型组装上下文和提示词，流式（SSE）或一次性（JSON）返回结果。
 
-use crate::api::{bad_request, load_book_data, not_found, upstream, ApiResult, AppError};
+use crate::api::{bad_request, load_book_data, mark_early_terms, not_found, upstream, ApiResult, AppError};
 use crate::db::AiLog;
 use crate::library;
 use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmClient, LlmEvent, Message, Usage, CANCELLED};
-use crate::memory::{compose, match_entries, render, render_entry, BookData, ComposeOpts};
+use crate::memory::{compose, match_entries, plan_text, render, render_entry, BookData, ComposeOpts};
 use crate::models::{Book, Chapter, Entry, Provider, Role, Settings};
 use crate::prompts::{self, golden_hint, instruction_block, render_id, titled, titled_block, Brief};
 use crate::skills::{self, Skill};
@@ -146,7 +146,7 @@ fn brief_from(req: &AiRequest, data: Option<&BookData>) -> Brief {
                 d.entries_at(None)
                     .into_iter()
                     .filter(|e| e.kind == "character")
-                    .map(|e| render_entry(e, &d.state_at(e, None)))
+                    .map(|e| render_entry(e, &d.description_at(e, None), &d.state_at(e, None)))
                     .collect::<Vec<_>>()
                     .join("\n")
             })
@@ -347,11 +347,12 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             let d = need(data)?;
             let e = req.entry_id.and_then(|id| d.entries.iter().find(|e| e.id == id)).ok_or_else(|| not_found("人物"))?;
             let convo: String = req.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
-            let related = match_entries(d.entries_at(None), &format!("{}\n{}", e.description, convo))
+            let desc = d.description_at(e, None);
+            let related = match_entries(d.entries_at(None), &format!("{desc}\n{convo}"))
                 .into_iter()
                 .filter(|x| x.id != e.id && !x.always_include)
                 .take(6)
-                .map(|x| render_entry(x, &d.state_at(x, None)))
+                .map(|x| render_entry(x, &d.description_at(x, None), &d.state_at(x, None)))
                 .collect::<Vec<_>>()
                 .join("\n");
             let history: Vec<Message> = req.messages.iter().filter(|m| m.role == "user" || m.role == "assistant").cloned().collect();
@@ -362,7 +363,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             v.insert("book_title", d.book.title.clone());
             v.insert("name", e.name.clone());
             let profile = [
-                titled_block("人物设定", &e.description, 1500),
+                titled_block("人物设定", &desc, 1500),
                 titled("不可改变的特征", &e.immutable),
                 titled("当前状态", &d.state_at(e, None)),
             ]
@@ -424,6 +425,62 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             v.insert("instruction_block", instruction_block(&req.instruction, "作者的要求"));
             Ok(prepared(Role::Writer, editor_system(&d.book.genre, ov), "task.chapter_outlines", &v, true))
         }
+        "reveal_plan" => {
+            let d = need(data)?;
+            // 作者底牌默认不发给模型，作者在生成揭示计划时勾选了才带上
+            let secrets = req.fields.get("include_secrets").and_then(Value::as_bool).unwrap_or(false);
+            let written = d.chapters.iter().filter(|c| !c.content.trim().is_empty()).filter_map(|c| d.number(c)).max().unwrap_or(0);
+            let volumes = d
+                .volumes
+                .iter()
+                .filter_map(|vol| {
+                    let vo = d.volume_outline_at(vol, None);
+                    (!vo.trim().is_empty()).then(|| format!("【卷纲 · {}】\n{}", vol.title, clip(&vo, 6000)))
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let entries = d
+                .entries_at(None)
+                .into_iter()
+                .map(|e| {
+                    let mut line = format!("{}｜{}", e.name.trim(), e.kind_label());
+                    let desc = d.description_at(e, None);
+                    if !desc.trim().is_empty() {
+                        line += &format!("｜{}", clip(&desc, 80));
+                    }
+                    if secrets && !e.secret.trim().is_empty() {
+                        line += &format!("｜作者底牌：{}", clip(&e.secret, 200));
+                    }
+                    line
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let chapters = d
+                .chapters
+                .iter()
+                .filter(|c| !c.content.trim().is_empty())
+                .map(|c| format!("{}：{}", d.label(c), clip(if c.summary.trim().is_empty() { &c.outline } else { &c.summary }, 300)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let existing = d
+                .active_reveals()
+                .map(|r| {
+                    let plan = plan_text(r);
+                    if plan.is_empty() { format!("· {}", r.title.trim()) } else { format!("· {}（{plan}）", r.title.trim()) }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut v = Vars::new();
+            v.insert("world_block", titled_block("世界观（作者层）", &d.world_at(None), 10000));
+            v.insert("outline_block", titled_block("总纲（作者层）", &d.outline_at(None), 10000));
+            v.insert("volumes_block", volumes);
+            v.insert("entries_block", titled_block("设定库（名称｜类别｜描述）", &entries, 8000));
+            v.insert("written_block", titled_block("已经写完的章节（章节：摘要）", &chapters, 15000));
+            v.insert("existing_block", titled_block("已有的秘密（在此基础上补充和修订，同一个秘密沿用原标题）", &existing, 3000));
+            v.insert("written", written.to_string());
+            v.insert("instruction_block", instruction_block(&req.instruction, "作者的要求"));
+            Ok(prepared(Role::Writer, editor_system(&d.book.genre, ov), "task.reveal_plan", &v, true))
+        }
         "names" => {
             let d = need(data)?;
             let goal = if req.goal.trim().is_empty() { req.instruction.trim() } else { req.goal.trim() };
@@ -450,7 +507,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                 return Err(bad_request("设定库里还没有人物"));
             }
             let ids: HashSet<i64> = cast.iter().map(|e| e.id).collect();
-            let people = cast.iter().map(|e| render_entry(e, &d.state_at(e, None))).collect::<Vec<_>>().join("\n");
+            let people = cast.iter().map(|e| render_entry(e, &d.description_at(e, None), &d.state_at(e, None))).collect::<Vec<_>>().join("\n");
             let rels = d.relation_lines(&ids, None).join("\n");
             let mut v = Vars::new();
             v.insert("context", ctx);
@@ -491,8 +548,29 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                         .collect::<Vec<_>>()
                         .join("\n");
                     let threads = d.open_threads(Some(c)).into_iter().map(|t| format!("{}. {}", t.id, t.title)).collect::<Vec<_>>().join("\n");
+                    let reveals = d
+                        .active_reveals()
+                        .filter(|r| !d.revealed_before(r, Some(c)))
+                        .map(|r| {
+                            let mut line = format!("{}. {}", r.id, r.title.trim());
+                            if !r.truth.trim().is_empty() {
+                                line += &format!("｜{}", clip(&r.truth, 80));
+                            }
+                            let terms = r.term_list();
+                            if !terms.is_empty() {
+                                line += &format!("｜{}", terms.join("、"));
+                            }
+                            let plan = plan_text(r);
+                            if !plan.is_empty() {
+                                line += &format!("｜{plan}");
+                            }
+                            line
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     v.insert("entries", if entries.is_empty() { "（暂无）".into() } else { entries });
                     v.insert("threads", if threads.is_empty() { "（暂无）".into() } else { threads });
+                    v.insert("reveals", if reveals.is_empty() { "（暂无）".into() } else { reveals });
                 }
                 "check" => {
                     let opts = ComposeOpts { current: Some(c), focus_text: &c.content, instruction: "", budget: s.context_budget, include_world: true, include_outline: false };
@@ -1006,10 +1084,15 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
     let (settings, parts, _) = prepare_request(&st, &req).await?;
     let Ok([prep]) = <[Prepared; 1]>::try_from(parts) else { return Err(bad_request("分块修订只能用流式接口")) };
     if prep.json {
-        let value = complete_json(&st, &settings, prep, &req).await?;
+        let mut value = complete_json(&st, &settings, prep, &req).await?;
         if req.task == "tension" {
             if let Some(cid) = req.chapter_id {
                 st.db.set_chapter_metrics(cid, &value)?;
+            }
+        }
+        if req.task == "reveal_plan" {
+            if let Some(bid) = req.book_id {
+                mark_early_terms(&load_book_data(&st.db, bid)?, &mut value);
             }
         }
         return Ok(Json(value));

@@ -3,6 +3,7 @@ import { store, emit, reload, chapterLabel } from './store.js';
 import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, fmtWords, readFile, pickFile, KIND, CHAR_FIELDS, ROLES, renderMarkdown, cleanAi, countWords, pushLayer } from './ui.js';
 import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
+import { openReveals, progressionEditor, revealReview } from './reveals.js';
 
 let genreProfiles = null;
 export async function loadGenres() {
@@ -257,7 +258,7 @@ export function openBookSettings() {
       field('一句话梗概', text('logline', 2, '主角是谁、想要什么、最大的阻碍')),
       field('作品简介', h('div', null, synopsis, genBtn('AI 写 3 版简介', 'synopsis', synopsis)))),
     world: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成世界观', 'world', world), visBtn(), h('span', { class: 'hint' }, '世界观会注入写作的上下文；后期的真相、高阶境界可以按标题分节，到对应的卷再给 AI')), world),
-    outline: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成总纲', 'outline', outline), visBtn(), h('span', { class: 'hint' }, '总纲决定全书走向；写正文时只给到当前卷，结局只给规划用')), outline),
+    outline: h('div', null, h('div', { class: 'row' }, genBtn('AI 生成总纲', 'outline', outline), visBtn(), h('button', { class: 'btn', title: '秘密什么时候埋种子、给线索、揭开', onclick: () => openReveals() }, '信息节奏'), h('span', { class: 'hint' }, '总纲决定全书走向；写正文时只给到当前卷，结局只给规划用')), outline),
     style: (() => {
       const guide = text('style_guide', 6, '比如：第三人称限知视角；语言简洁口语化，少用成语；对话占一半以上；每章至少一个爽点。');
       const sample = text('style_sample', 12, '贴一段你自己写得满意的文字（或你想要的风格），AI 会模仿它的句式和节奏。');
@@ -604,11 +605,13 @@ export async function openFinalize() {
   let summary;
   let ext;
   let tension = null;
+  let plan = { reveals: [] };
   try {
-    [summary, ext, tension] = await Promise.all([
+    [summary, ext, tension, plan] = await Promise.all([
       api.post('/ai/json', { task: 'summarize', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'extract', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'tension', book_id: store.book.id, chapter_id: ch.id }).catch(() => null),
+      api.get(`/books/${store.book.id}/reveals`).catch(() => ({ reveals: [] })),
     ]);
   } catch (e) {
     m.body.innerHTML = '';
@@ -659,6 +662,7 @@ export async function openFinalize() {
     h('div', { class: 'grow' },
       h('div', { class: 'entry-head' }, h('span', { class: 'badge' }, '回收'), h('b', null, store.threads.find((x) => x.id === t.id)?.title)),
       t.note ? h('div', { class: 'small' }, t.note) : null)));
+  const reveals = revealReview(ext, plan.reveals || []);
 
   m.body.innerHTML = '';
   m.body.append(h('div', null,
@@ -668,7 +672,8 @@ export async function openFinalize() {
     h('h4', null, `设定变化（${entries.length}）`),
     entries.length ? entryRows : h('div', { class: 'empty' }, '没有发现设定变化'),
     h('h4', null, `伏笔（新埋 ${threadsNew.length}，回收 ${threadsResolved.length}）`),
-    threadsNew.length || threadsResolved.length ? [threadRows, resolvedRows] : h('div', { class: 'empty' }, '没有发现新伏笔或回收')));
+    threadsNew.length || threadsResolved.length ? [threadRows, resolvedRows] : h('div', { class: 'empty' }, '没有发现新伏笔或回收'),
+    reveals.el));
   m.setActions([
     { label: '取消', onClick: (c) => c() },
     {
@@ -687,6 +692,7 @@ export async function openFinalize() {
             threads_progressed: threadsProgressed,
             threads_resolved: threadsResolved.filter((t) => t.checked),
             relations: ext.relations || [],
+            ...reveals.picked(),
           });
           await store.editor.setStatus('done');
           await reload(['entries', 'threads', 'chapters']);
@@ -695,7 +701,8 @@ export async function openFinalize() {
           emit('chapters-changed');
           emit('chapter-loaded', store.chapter);
           close();
-          toast(`已定稿：新增设定 ${r.created}，更新 ${r.updated}，新伏笔 ${r.threads_added}，回收 ${r.threads_resolved}`, 'info', 4500);
+          const revealNote = r.reveal_steps || r.reveals_added ? `，揭示进度 ${r.reveal_steps + r.reveals_added}` : '';
+          toast(`已定稿：新增设定 ${r.created}，更新 ${r.updated}，新伏笔 ${r.threads_added}，回收 ${r.threads_resolved}${revealNote}`, 'info', 4500);
         } catch (e) {
           toast(e.message, 'error');
         }
@@ -844,7 +851,8 @@ export function openBatchFinalize() {
         ]);
         let note = '已生成摘要';
         if (o.autoApply) {
-          const r = await api.post(`/books/${store.book.id}/apply_updates`, { chapter_id: c.id, entries: ext.entries || [], threads_new: ext.threads_new || [], threads_progressed: ext.threads_progressed || [], threads_resolved: ext.threads_resolved || [], relations: ext.relations || [] });
+          // 计划外的新秘密要作者判断，批量时不自动建；对得上计划的揭示进度照常记下
+          const r = await api.post(`/books/${store.book.id}/apply_updates`, { chapter_id: c.id, entries: ext.entries || [], threads_new: ext.threads_new || [], threads_progressed: ext.threads_progressed || [], threads_resolved: ext.threads_resolved || [], relations: ext.relations || [], reveals: ext.reveals || [] });
           await api.patch(`/chapters/${c.id}`, { status: 'done' });
           note += `，设定新增 ${r.created}、更新 ${r.updated}，伏笔新增 ${r.threads_added}、回收 ${r.threads_resolved}`;
         }
@@ -1232,6 +1240,7 @@ export function openPalette() {
     ['规划本章节拍', () => emit('run-beats')],
     ['定稿本章', () => openFinalize()],
     ['连续性体检', () => emit('switch-tab', 'check')],
+    ['信息节奏（揭示计划）', () => openReveals()],
     ['AI 规划后续章纲', () => openPlanner()],
     ['批量起草', () => openBatchDraft()],
     ['批量定稿 / 建档', () => openBatchFinalize()],
@@ -1448,7 +1457,8 @@ export function openEntry(entry) {
         field('不可改变的特征', h('input', { value: e.immutable, placeholder: '写崩就会被读者骂的东西：性格底线、身世、口头禅', oninput: (ev) => { e.immutable = ev.target.value; } })),
         h('div', { class: 'grid2' },
           field('可见性', gatePicker(e.visibility, (v) => { e.visibility = v; }), '后期才登场或揭晓的设定设成「从第 N 卷起」，写前面的章节时 AI 看不到它，体检也会查出提前写出来的地方'),
-          field('作者底牌', h('textarea', { rows: 2, value: e.secret, placeholder: '真实身份、后期反转……', oninput: (ev) => { e.secret = ev.target.value; } }), '只给你自己看，任何时候都不发给 AI')),
+          field('作者底牌', h('textarea', { rows: 2, value: e.secret, placeholder: '真实身份、后期反转……', oninput: (ev) => { e.secret = ev.target.value; } }), '只给你自己看，写作时不发给 AI；生成揭示计划时可以勾选带上')),
+        isNew ? h('p', { class: 'hint' }, '保存后可以添加「设定进展」：写到第几章起补充或替换描述。') : progressionEditor(e),
         stateBox,
         history,
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: e.always_include, onchange: (ev) => { e.always_include = ev.target.checked; } }), '常驻：每次写作都带上（适合主角、核心体系）'));

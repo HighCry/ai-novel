@@ -154,6 +154,33 @@ button:disabled { opacity: .55; cursor: wait; }
 .vis-row:last-child { border-bottom: none; }
 .vis-title { flex: 1; min-width: 12em; font-size: 13px; }
 
+/* 信息节奏：每条秘密一根时间条，空心是计划，实心是实际进度 */
+.rv-axis { display: flex; justify-content: space-between; margin: 10px 0 2px; }
+.rv-row { padding: 6px 0 10px; border-bottom: 1px dashed var(--border); }
+.rv-row.dropped { opacity: .55; }
+.rv-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; margin-bottom: 6px; }
+.rv-head:hover b { color: var(--accent); }
+.rv-bar { position: relative; height: 18px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); touch-action: none; }
+.rv-now { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--text); opacity: .35; border-radius: 1px; }
+.rv-mark { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; border: 2px solid var(--muted); background: var(--surface); }
+.rv-mark.plan { cursor: grab; }
+.rv-mark.plan:active { cursor: grabbing; }
+.rv-mark.done { width: 10px; height: 10px; margin: -5px 0 0 -5px; border-color: transparent; }
+.rv-mark.seed { border-color: var(--green); }
+.rv-mark.clue { border-color: var(--warn); }
+.rv-mark.reveal { border-color: var(--danger); }
+.rv-mark.done.seed { background: var(--green); }
+.rv-mark.done.clue { background: var(--warn); }
+.rv-mark.done.reveal { background: var(--danger); }
+.rv-tip { position: absolute; bottom: 22px; transform: translateX(-50%); font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--text); color: var(--surface); white-space: nowrap; pointer-events: none; }
+.rv-events { margin-top: 8px; }
+.rv-event { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+.rv-event b { white-space: nowrap; }
+.rv-drafts .change-item .row { gap: 6px; align-items: center; }
+.prog-box { margin: 6px 0 10px; }
+.prog-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.prog-row select { width: auto; }
+
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .chip { border: 1px solid var(--border); background: var(--surface); border-radius: 14px; padding: 2px 10px; font-size: 12px; color: var(--muted); }
 .chip:hover, .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }

@@ -76,6 +76,9 @@ pub fn load_book_data(db: &Db, book_id: i64) -> Result<BookData, AppError> {
         db.list_book_states(book_id)?,
     );
     data.relations = db.list_relations(book_id)?;
+    data.reveals = db.list_reveals(book_id)?;
+    data.reveal_events = db.list_book_reveal_events(book_id)?;
+    data.progressions = db.list_book_progressions(book_id)?;
     Ok(data)
 }
 
@@ -447,6 +450,224 @@ pub async fn patch_entry(State(st): State<AppState>, Path(id): Path<i64>, Json(p
     Ok(Json(st.db.get_entry(id)?.ok_or_else(|| not_found("设定"))?))
 }
 
+// ---------- 设定进展 ----------
+
+/// 进展的生效位置按可见性的写法存；空着或写法看不懂时报错，免得存进去永远不生效。
+fn normalize_progression(p: &mut Progression) -> Result<(), AppError> {
+    p.gate = crate::visibility::normalize(&p.gate)
+        .filter(|g| !g.is_empty())
+        .ok_or_else(|| bad_request(format!("从哪里起生效「{}」看不懂，可以写：第91章起、第2卷起", p.gate.trim())))?;
+    p.mode = if p.mode == "replace" { "replace".into() } else { "add".into() };
+    if p.text.trim().is_empty() {
+        return Err(bad_request("进展内容不能为空"));
+    }
+    Ok(())
+}
+
+pub async fn list_progressions(State(st): State<AppState>, Path(entry_id): Path<i64>) -> ApiResult<Vec<Progression>> {
+    Ok(Json(st.db.list_entry_progressions(entry_id)?))
+}
+
+pub async fn create_progression(State(st): State<AppState>, Path(entry_id): Path<i64>, Json(mut p): Json<Progression>) -> ApiResult<Progression> {
+    st.db.get_entry(entry_id)?.ok_or_else(|| not_found("设定"))?;
+    p.id = 0;
+    p.entry_id = entry_id;
+    normalize_progression(&mut p)?;
+    Ok(Json(st.db.save_progression(&p)?))
+}
+
+pub async fn patch_progression(State(st): State<AppState>, Path(id): Path<i64>, Json(v): Json<Value>) -> ApiResult<Progression> {
+    let p = st.db.get_progression(id)?.ok_or_else(|| not_found("设定进展"))?;
+    let mut updated: Progression = apply_patch(&p, &v, &["id", "entry_id", "created_at"])?;
+    normalize_progression(&mut updated)?;
+    Ok(Json(st.db.save_progression(&updated)?))
+}
+
+pub async fn delete_progression(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    st.db.delete_progression(id)?;
+    ok()
+}
+
+// ---------- 秘密台账（揭示计划） ----------
+
+fn normalize_gap(gap: &str) -> String {
+    ["惊奇", "悬念", "好奇"].into_iter().find(|g| gap.contains(g)).map_or_else(|| gap.trim().to_string(), str::to_string)
+}
+
+/// 秘密列表，附每条的揭示进度（带章号）和写到第几章，给信息节奏面板画时间条。
+pub async fn list_reveals(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Value> {
+    require_book(&st.db, book_id)?;
+    let data = load_book_data(&st.db, book_id)?;
+    let written = data.chapters.iter().filter(|c| !c.content.trim().is_empty()).filter_map(|c| data.number(c)).max().unwrap_or(0);
+    let chapters = data.chapters.iter().filter_map(|c| data.number(c)).max().unwrap_or(0);
+    let reveals: Vec<Value> = data
+        .reveals
+        .iter()
+        .map(|r| {
+            let mut v = serde_json::to_value(r).unwrap_or_default();
+            v["events"] = json!(data
+                .reveal_events_before(r, None)
+                .into_iter()
+                .map(|e| json!({ "id": e.id, "chapter_id": e.chapter_id, "number": data.event_number(e), "step": e.step, "quote": e.quote, "note": e.note }))
+                .collect::<Vec<_>>());
+            v
+        })
+        .collect();
+    Ok(Json(json!({ "reveals": reveals, "written": written, "chapters": chapters })))
+}
+
+fn check_reveal(r: &mut Reveal) -> Result<(), AppError> {
+    if r.title.trim().is_empty() {
+        return Err(bad_request("秘密要有个标题"));
+    }
+    r.gap = normalize_gap(&r.gap);
+    r.terms = split_terms(&r.terms).join("、");
+    r.exceptions = split_terms(&r.exceptions).join("、");
+    Ok(())
+}
+
+pub async fn create_reveal(State(st): State<AppState>, Path(book_id): Path<i64>, Json(mut r): Json<Reveal>) -> ApiResult<Reveal> {
+    require_book(&st.db, book_id)?;
+    r.id = 0;
+    r.book_id = book_id;
+    check_reveal(&mut r)?;
+    Ok(Json(st.db.save_reveal(&r)?))
+}
+
+pub async fn patch_reveal(State(st): State<AppState>, Path(id): Path<i64>, Json(v): Json<Value>) -> ApiResult<Reveal> {
+    let r = st.db.get_reveal(id)?.ok_or_else(|| not_found("秘密"))?;
+    let mut updated: Reveal = apply_patch(&r, &v, &["id", "book_id", "updated_at"])?;
+    check_reveal(&mut updated)?;
+    Ok(Json(st.db.save_reveal(&updated)?))
+}
+
+pub async fn delete_reveal(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    st.db.delete_reveal(id)?;
+    ok()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct EventIn {
+    pub chapter_id: i64,
+    pub step: String,
+    pub quote: String,
+    pub note: String,
+}
+
+pub async fn add_reveal_event(State(st): State<AppState>, Path(id): Path<i64>, Json(e): Json<EventIn>) -> ApiResult<Value> {
+    let r = st.db.get_reveal(id)?.ok_or_else(|| not_found("秘密"))?;
+    let step = normalize_step(&e.step).ok_or_else(|| bad_request("步骤只能是 seed（埋种子）、clue（给线索）、reveal（揭开）"))?;
+    st.db.get_chapter(e.chapter_id)?.filter(|c| c.book_id == r.book_id).ok_or_else(|| not_found("章节"))?;
+    let id = st.db.add_reveal_event(&RevealEvent { reveal_id: id, chapter_id: e.chapter_id, step: step.into(), quote: e.quote, note: e.note, ..Default::default() })?;
+    Ok(Json(json!({ "id": id })))
+}
+
+pub async fn delete_reveal_event(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    st.db.delete_reveal_event(id)?;
+    ok()
+}
+
+/// 模型给的词表可能是数组，也可能是一串用顿号隔开的字。
+fn value_terms(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(items) => items.iter().filter_map(|x| x.as_str()).flat_map(split_terms).collect(),
+        Value::String(s) => split_terms(s),
+        _ => Vec::new(),
+    }
+}
+
+/// 模型给的章号可能是 12、"12"、"第12章"。
+fn value_chapter(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64().filter(|n| *n > 0),
+        Value::String(s) => {
+            let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
+            digits.parse().ok().or_else(|| crate::text::parse_cn_number(s.trim().trim_start_matches('第').trim_end_matches('章'))).filter(|n| *n > 0)
+        }
+        _ => None,
+    }
+}
+
+/// 给 reveal_plan 的草稿标上 seen：哪些泄露词在揭开之前的已写章节里已经出现过，审核时提醒作者删掉。
+/// 揭开的章按采纳时的算法定：已写章节里做过的 reveal（章节存在才算），否则用计划的 reveal_at。
+pub fn mark_early_terms(d: &BookData, plan: &mut Value) {
+    let exists = |n: &i64| d.chapters.iter().any(|c| d.number(c) == Some(*n));
+    let Some(secrets) = plan.get_mut("secrets").and_then(Value::as_array_mut) else { return };
+    for s in secrets {
+        let done_reveal = s["done"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| normalize_step(x["step"].as_str().unwrap_or("")) == Some("reveal"))
+            .filter_map(|x| value_chapter(&x["chapter"]))
+            .find(exists);
+        let reveal = done_reveal.or_else(|| value_chapter(&s["reveal_at"]));
+        let seen = crate::logic::early_terms(d, &value_terms(&s["terms"]), &value_terms(&s["exceptions"]), reveal);
+        if let Some(obj) = s.as_object_mut() {
+            obj.insert("seen".into(), seen.into_iter().map(|(term, chapter)| json!({ "term": term, "chapter": chapter })).collect());
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct PlanApply {
+    /// 先删掉这本书原有的秘密和揭示进度，整份换成新的
+    pub replace: bool,
+    pub secrets: Vec<Value>,
+}
+
+/// 采纳 reveal_plan 生成、作者审过的揭示计划：同标题的秘密更新，其余新建；已写章节里做过的步骤记成揭示进度。
+pub async fn apply_reveal_plan(State(st): State<AppState>, Path(book_id): Path<i64>, Json(p): Json<PlanApply>) -> ApiResult<Value> {
+    require_book(&st.db, book_id)?;
+    let data = load_book_data(&st.db, book_id)?;
+    if p.replace {
+        st.db.delete_book_reveals(book_id)?;
+    }
+    let existing = if p.replace { Vec::new() } else { st.db.list_reveals(book_id)? };
+    let entry_id = |name: &str| data.entries.iter().find(|e| e.keywords().iter().any(|k| k == name)).map(|e| e.id);
+    let chapter_id = |n: i64| data.chapters.iter().find(|c| data.number(c) == Some(n)).map(|c| c.id);
+    let text = |s: &Value, k: &str| s[k].as_str().unwrap_or("").trim().to_string();
+    let (mut created, mut updated, mut events) = (0, 0, 0);
+    for (i, s) in p.secrets.iter().enumerate() {
+        let title = text(s, "title");
+        if title.is_empty() {
+            continue;
+        }
+        let mut r = existing.iter().find(|r| r.title.trim() == title).cloned().unwrap_or(Reveal { book_id, ..Default::default() });
+        let is_new = r.id == 0;
+        r.title = title;
+        r.truth = text(s, "truth");
+        r.misread = text(s, "misread");
+        r.gap = normalize_gap(&text(s, "gap"));
+        r.terms = value_terms(&s["terms"]).join("、");
+        r.exceptions = value_terms(&s["exceptions"]).join("、");
+        r.entry_ids = value_terms(&s["entries"]).iter().filter_map(|n| entry_id(n)).collect();
+        r.entry_ids.dedup();
+        r.seed_at = value_chapter(&s["seed_at"]);
+        r.clue_at = value_chapter(&s["clue_at"]);
+        r.reveal_at = value_chapter(&s["reveal_at"]);
+        r.seed_note = text(s, "seed_note");
+        r.clue_note = text(s, "clue_note");
+        r.payoff = text(s, "payoff");
+        r.status = "active".into();
+        r.sort = i as i64;
+        let saved = st.db.save_reveal(&r)?;
+        if is_new {
+            created += 1;
+        } else {
+            updated += 1;
+        }
+        for d in s["done"].as_array().into_iter().flatten() {
+            let (Some(step), Some(cid)) = (normalize_step(d["step"].as_str().unwrap_or("")), value_chapter(&d["chapter"]).and_then(chapter_id)) else { continue };
+            st.db.add_reveal_event(&RevealEvent { reveal_id: saved.id, chapter_id: cid, step: step.into(), quote: text(d, "quote"), note: text(d, "note"), ..Default::default() })?;
+            events += 1;
+        }
+    }
+    Ok(Json(json!({ "created": created, "updated": updated, "events": events })))
+}
+
 pub async fn entry_states(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Vec<EntryState>> {
     Ok(Json(st.db.list_entry_states(id)?))
 }
@@ -499,6 +720,28 @@ pub struct Updates {
     pub threads_progressed: Vec<ThreadResolved>,
     pub threads_resolved: Vec<ThreadResolved>,
     pub relations: Vec<RelationUpdate>,
+    /// 本章对哪些秘密埋了种子、给了线索或揭开了
+    pub reveals: Vec<RevealStep>,
+    /// 计划外的新秘密
+    pub reveals_new: Vec<RevealNew>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct RevealStep {
+    pub id: i64,
+    pub step: String,
+    pub quote: String,
+    pub note: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct RevealNew {
+    pub title: String,
+    pub truth: String,
+    pub gap: String,
+    pub quote: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -657,6 +900,28 @@ pub async fn apply_updates(State(st): State<AppState>, Path(book_id): Path<i64>,
         st.db.save_relation(&rel)?;
         relations += 1;
     }
+    // 揭示进度：只认这本书的秘密；计划外的新秘密记成从本章埋下
+    let (mut reveal_steps, mut reveals_added) = (0, 0);
+    if let Some(cid) = u.chapter_id {
+        let known = st.db.list_reveals(book_id)?;
+        for s in &u.reveals {
+            let Some(step) = normalize_step(&s.step) else { continue };
+            if !known.iter().any(|r| r.id == s.id) {
+                continue;
+            }
+            st.db.add_reveal_event(&RevealEvent { reveal_id: s.id, chapter_id: cid, step: step.into(), quote: s.quote.clone(), note: s.note.clone(), ..Default::default() })?;
+            reveal_steps += 1;
+        }
+        let number = st.db.list_chapter_metas(book_id)?.into_iter().find(|m| m.id == cid).and_then(|m| m.number);
+        for n in u.reveals_new.iter().filter(|n| !n.title.trim().is_empty()) {
+            if known.iter().any(|r| r.title.trim() == n.title.trim()) {
+                continue;
+            }
+            let r = st.db.save_reveal(&Reveal { book_id, title: n.title.clone(), truth: n.truth.trim().to_string(), gap: normalize_gap(&n.gap), seed_at: number, ..Default::default() })?;
+            st.db.add_reveal_event(&RevealEvent { reveal_id: r.id, chapter_id: cid, step: "seed".into(), quote: n.quote.clone(), ..Default::default() })?;
+            reveals_added += 1;
+        }
+    }
     Ok(Json(json!({
         "created": created,
         "updated": updated,
@@ -664,6 +929,8 @@ pub async fn apply_updates(State(st): State<AppState>, Path(book_id): Path<i64>,
         "threads_progressed": threads_progressed,
         "threads_resolved": threads_resolved,
         "relations": relations,
+        "reveal_steps": reveal_steps,
+        "reveals_added": reveals_added,
     })))
 }
 

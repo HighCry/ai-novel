@@ -248,6 +248,9 @@ const EXTRACT: &str = "下面是小说设定库的现状和最新一章正文。
 【未回收的伏笔（编号. 标题）】
 {{threads}}
 
+【揭示计划里还没揭开的秘密（编号. 标题｜真相｜泄露词｜计划）】
+{{reveals}}
+
 【{{chapter}}】
 {{content}}
 
@@ -256,10 +259,41 @@ const EXTRACT: &str = "下面是小说设定库的现状和最新一章正文。
  \"threads_new\":[{\"title\":\"本章新埋下的伏笔或悬念\",\"detail\":\"具体内容和可能的回收方向\"}],
  \"threads_progressed\":[{\"id\":1,\"note\":\"本章如何推进了这条伏笔\"}],
  \"threads_resolved\":[{\"id\":1,\"note\":\"本章如何回收\"}],
- \"relations\":[{\"a\":\"人物甲\",\"b\":\"人物乙\",\"kind\":\"师徒/敌对/恋人/盟友/亲属/上下级/交易/暧昧等\",\"detail\":\"一句话说明\",\"status\":\"active/ended\"}]}
+ \"relations\":[{\"a\":\"人物甲\",\"b\":\"人物乙\",\"kind\":\"师徒/敌对/恋人/盟友/亲属/上下级/交易/暧昧等\",\"detail\":\"一句话说明\",\"status\":\"active/ended\"}],
+ \"reveals\":[{\"id\":1,\"step\":\"seed/clue/reveal\",\"quote\":\"原文里对应的句子（原样摘录）\",\"note\":\"一句话说明这一步做了什么\"}],
+ \"reveals_new\":[{\"title\":\"话题式短标题，不写答案\",\"truth\":\"真相\",\"gap\":\"好奇/惊奇/悬念\",\"quote\":\"原文\"}]}
 relations 只列这一章里新建立、发生变化或结束的关系。
 人物用 fields 写这一章结束时的状态：location 位置，power 实力等级，body 身体状况，mind 心理状态，items 关键物品，recent 近期经历，knows 知道了哪些秘密，unaware 还不知道的重要事实；没有变化的字段留空或省略。
+reveals 只列这一章对上面的秘密确实做了的一步：seed 埋种子（顺嘴提到、没有解释），clue 给线索（人物撞见一角，读者能拼出一部分），reveal 揭开（读者知道了真相）；每条都要引用原文，拿不出原文的不要列。reveals_new 只列本章新冒出来、上面没有、要藏到后面才揭开的真相，没有就给空数组。
 只列出确实有变化的条目；状态没有变化的已有条目不要列出；不要编造正文里没有的信息。";
+
+const REVEAL_PLAN: &str = "下面是一部小说的作者层资料：世界观、总纲、卷纲、设定库和已经写完的章节。请为它做一份揭示计划：把读者暂时不该知道的真相拆成一条条秘密，规划每条在第几章埋种子、第几章给线索、第几章揭开。
+
+{{world_block}}
+
+{{outline_block}}
+
+{{volumes_block}}
+
+{{entries_block}}
+
+{{written_block}}
+
+{{existing_block}}
+
+按“倒推”来做：先写真相，再想揭开前读者会怎么误会，再定三步计划和泄露词。{{instruction_block}}
+1. 只拆会影响读者理解剧情的真相：世界的真相、力量体系的上层、人物的真实身份和目的、金手指的来历和代价、幕后势力和阴谋、关键物品的真正用途。一条一个秘密；同一个真相分几次揭开时拆成几条，比如先揭开“她是逆命司的人”，后面再揭开“她是第七席”。
+2. title 写成话题，不写答案：写“天轨的来历”，不要写“天轨是伪神铸造的锁链”。标题会出现在写正文时的禁区里，标题本身不能把答案说出来。
+3. gap 选一个：好奇（读者知道这里有谜，可以亮出缺口）、惊奇（不能让读者提前察觉，只留公平线索）、悬念（读者知道危险，结果延后）。
+4. terms 是泄露词：揭开之前正文里一出现就等于说破，写正文时会列进禁区不许写。只写知道真相才说得出的专有名词，不写“真相”“秘密”这类泛词；已经写完的章节里出现过的名字——人物、地名、宗门、物品、功法、金手指，还有赋税、官职这类日常说法——读者早就见过，背后藏着秘密也不能当泄露词，秘密写进 truth 就够了。exceptions 写含有泄露词、但只是普通称呼不算说破的词，比如“天轨护道盟”只是机构名，不算说破“天轨”的来历。
+5. seed_at、clue_at、reveal_at 写章号（从第 1 章数的整数）：按总纲和卷纲安排的时间点，卷纲里没写到具体章的按所在卷估算；埋种子早于给线索，给线索早于揭开；关键线索和揭开之间隔十章以上；全书后期才揭开的可以只写 reveal_at。
+6. seed_note、clue_note 写这一步在正文里长什么样：只写读者看得到的异常、物件、传闻、对话，不写答案，比如“矿奴间传说天上那道光每年会暗一次”。
+7. done 列出已经写完的章节（第 1 到第 {{written}} 章）里这条秘密已经做过的步骤，按章节内容判断：step 写 seed、clue 或 reveal，chapter 写章号，note 一句话说明。已经在正文里揭开的秘密也要列出来，标上 reveal；没有写完的章节时 done 为空数组。
+8. entries 写关联的设定条目，用设定库里的原名。
+9. 写 8～25 条，按揭开的先后排列。
+
+只输出 JSON，格式：
+{\"secrets\":[{\"title\":\"话题式短标题\",\"truth\":\"真相（作者层）\",\"misread\":\"揭开前读者最容易相信的解释，可以为空\",\"gap\":\"好奇/惊奇/悬念\",\"terms\":[\"泄露词\"],\"exceptions\":[\"不算说破的词\"],\"entries\":[\"设定名称\"],\"seed_at\":1,\"seed_note\":\"\",\"clue_at\":5,\"clue_note\":\"\",\"reveal_at\":40,\"payoff\":\"揭开后改变什么：人物、关系、资源、世界、对手\",\"done\":[{\"step\":\"seed\",\"chapter\":1,\"note\":\"\"}]}]}";
 
 const CHECK: &str = "请核对下面这一章和已有设定、前情是否矛盾。
 
@@ -556,9 +590,26 @@ pub const TEMPLATES: &[Template] = &[
         id: "task.extract",
         name: "提取设定变化",
         group: "分析",
-        description: "定稿时找出人物状态变化和伏笔",
-        vars: &[("entries", "已有设定列表"), ("threads", "未回收伏笔列表"), V_CHAPTER, V_CONTENT],
+        description: "定稿时找出人物状态变化、伏笔和揭示进度",
+        vars: &[("entries", "已有设定列表"), ("threads", "未回收伏笔列表"), ("reveals", "揭示计划里还没揭开的秘密"), V_CHAPTER, V_CONTENT],
         text: EXTRACT,
+    },
+    Template {
+        id: "task.reveal_plan",
+        name: "揭示计划",
+        group: "规划",
+        description: "把读者暂时不该知道的真相拆成秘密，规划每条在第几章埋种子、给线索、揭开",
+        vars: &[
+            ("world_block", "世界观（作者层，去掉对 AI 隐藏的节）"),
+            ("outline_block", "总纲（作者层）"),
+            ("volumes_block", "各卷卷纲"),
+            ("entries_block", "设定库：名称、类别、描述；勾选时附作者底牌"),
+            ("written_block", "已经写完的章节和摘要"),
+            ("existing_block", "已有的秘密"),
+            ("written", "已经写到第几章"),
+            V_INSTRUCTION,
+        ],
+        text: REVEAL_PLAN,
     },
     Template { id: "task.check", name: "一致性检查", group: "分析", description: "核对本章和设定、前情是否矛盾", vars: &[V_CONTEXT, V_CHAPTER, V_CONTENT], text: CHECK },
     Template {

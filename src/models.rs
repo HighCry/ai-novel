@@ -177,11 +177,9 @@ impl Entry {
     /// 名称和别名，用于在正文、章纲里匹配出场的设定。
     pub fn keywords(&self) -> Vec<String> {
         let mut out = vec![self.name.trim().to_string()];
-        let seps = |c: char| matches!(c, ',' | '，' | '、' | ';' | '；' | '/' | '|') || c.is_whitespace();
-        for alias in self.aliases.split(seps) {
-            let alias = alias.trim();
-            if !alias.is_empty() && !out.iter().any(|k| k == alias) {
-                out.push(alias.to_string());
+        for alias in split_terms(&self.aliases) {
+            if !out.contains(&alias) {
+                out.push(alias);
             }
         }
         out.retain(|k| !k.is_empty());
@@ -237,6 +235,120 @@ pub struct Thread {
     /// 最近一次推进这条伏笔的章节
     pub last_chapter_id: Option<i64>,
     pub updated_at: i64,
+}
+
+/// 按顿号、逗号、分号、斜杠或空白拆开的词，去掉空的和重复的。
+pub fn split_terms(s: &str) -> Vec<String> {
+    let seps = |c: char| matches!(c, ',' | '，' | '、' | ';' | '；' | '/' | '|') || c.is_whitespace();
+    let mut out: Vec<String> = Vec::new();
+    for t in s.split(seps).map(str::trim).filter(|t| !t.is_empty()) {
+        if !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// 秘密台账里的一条：读者暂时不知道的一个真相，和它的三步揭示计划（埋种子、给线索、揭开）。
+/// 字段参考 webnovel-handbook 的真相台账，见 docs/叙事逻辑架构方案.md 第五节。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Reveal {
+    pub id: i64,
+    pub book_id: i64,
+    /// 话题式的短标题，不写答案：写「天轨的来历」，不写「天轨是伪神铸造的锁链」，因为标题会出现在写正文时的禁区里
+    pub title: String,
+    /// 最终真相：作者层，只给规划和定稿提取用，写正文时只在揭开的那一章给
+    pub truth: String,
+    /// 揭开前读者最容易相信的表面解释
+    pub misread: String,
+    /// 好奇 / 惊奇 / 悬念
+    pub gap: String,
+    /// 泄露词，顿号分隔：揭开之前正文里写出来就算点破
+    pub terms: String,
+    /// 含泄露词但不算点破的说法，比如「天轨护道盟」只是机构名
+    pub exceptions: String,
+    pub entry_ids: Vec<i64>,
+    /// 计划在第几章埋种子、给线索、揭开
+    pub seed_at: Option<i64>,
+    pub clue_at: Option<i64>,
+    pub reveal_at: Option<i64>,
+    /// 种子、线索在正文里长什么样：只写读者看得到的异常、物件、传闻，不写答案
+    pub seed_note: String,
+    pub clue_note: String,
+    /// 揭开后改变什么：人物、关系、资源、世界、对手
+    pub payoff: String,
+    /// active / dropped
+    pub status: String,
+    pub sort: i64,
+    pub updated_at: i64,
+}
+
+impl Reveal {
+    pub fn term_list(&self) -> Vec<String> {
+        split_terms(&self.terms)
+    }
+
+    pub fn exception_list(&self) -> Vec<String> {
+        split_terms(&self.exceptions)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status != "dropped"
+    }
+
+    /// 「惊奇」类在揭开前不能引人注意，不往近期钩子里放。
+    pub fn is_surprise(&self) -> bool {
+        self.gap.contains("惊奇")
+    }
+}
+
+/// 某一章对某个秘密做了哪一步，定稿时写入；读者知道什么，就是截至某章的全部揭示进度。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RevealEvent {
+    pub id: i64,
+    pub reveal_id: i64,
+    pub chapter_id: i64,
+    /// seed 埋种子 / clue 给线索 / reveal 揭开
+    pub step: String,
+    /// 原文依据
+    pub quote: String,
+    pub note: String,
+    pub created_at: i64,
+}
+
+pub fn step_label(step: &str) -> &'static str {
+    match step {
+        "seed" => "埋种子",
+        "reveal" => "揭开",
+        _ => "给线索",
+    }
+}
+
+/// 把模型或作者写的步骤名统一成 seed / clue / reveal，不认识的返回 None。
+pub fn normalize_step(step: &str) -> Option<&'static str> {
+    match step.trim() {
+        "seed" | "种子" | "埋种子" => Some("seed"),
+        "clue" | "线索" | "给线索" => Some("clue"),
+        "reveal" | "揭开" | "揭示" | "揭晓" | "揭真相" => Some("reveal"),
+        _ => None,
+    }
+}
+
+/// 设定进展：写到某一章（或某一卷）起，给设定描述补一段或整段换掉，参考 Novelcrafter 的 Progressions。
+/// 描述里只写读者一开始就能知道的，后面才揭开的写成进展，写到那里 AI 才看得到。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Progression {
+    pub id: i64,
+    pub entry_id: i64,
+    /// 从哪里起生效，写法同可见性：「第91章起」「第4卷起」
+    pub gate: String,
+    /// add 补充 / replace 替换
+    pub mode: String,
+    pub text: String,
+    pub created_at: i64,
 }
 
 /// 两个设定条目之间的关系（参考 wenmai 的关系图谱）

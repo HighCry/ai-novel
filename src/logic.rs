@@ -1,5 +1,6 @@
-//! 叙事逻辑的规则检查：不调用模型，找出设定超前、新名词过密、大段纯设定、境界走向和物品去向的问题，每条都附原文。
-//! 新名词密度和纯设定段落改编自 webnovel-handbook（MIT）第 28 章的信息投放规则；
+//! 叙事逻辑的规则检查：不调用模型，找出设定超前、新名词过密、大段纯设定、境界走向和物品去向的问题，每条都附原文；
+//! 有揭示计划时再查泄露词提前出现、信息进度断档、揭开前没唤醒和揭示逾期。
+//! 新名词密度、纯设定段落、信息进度和记忆温度改编自 webnovel-handbook（MIT）第 26、28 章的信息投放规则；
 //! 境界、物品按章节入账后比对前后状态，思路参考 FactTrack（NAACL 2025）。结果并进连续性体检，由作者判断。
 
 use crate::continuity::{finding, Finding};
@@ -13,6 +14,7 @@ use std::sync::OnceLock;
 pub fn check(d: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
     leaks(d, &mut out);
+    reveals(d, &mut out);
     new_terms(d, &mut out);
     exposition(d, &mut out);
     realms(d, &mut out);
@@ -79,6 +81,110 @@ fn leaks(d: &BookData, out: &mut Vec<Finding>) {
                 f.quote = sentence_at(&c.content, pos);
                 out.push(f);
             }
+        }
+    }
+}
+
+// ---------- 揭示计划：泄露词、信息进度、记忆温度、揭示逾期 ----------
+
+/// 开着的秘密隔这么多章没有任何种子、线索就提醒（webnovel-handbook：每 3～8 章给一次信息进度）
+const QUIET_REVEAL_CHAPTERS: i64 = 8;
+/// 揭开前最近一次线索隔了这么多章，读者多半已经忘了（webnovel-handbook：关键线索隔十章以上再揭示，揭示前要唤醒）
+const COLD_REVEAL_CHAPTERS: i64 = 10;
+/// 离计划揭开还剩这么多章以内才提醒唤醒，太早提醒没用
+const WARM_UP_AHEAD: i64 = 5;
+
+/// 先把例外说法换成等长的空格再找泄露词，「天轨护道盟」就不算点破「天轨」，命中位置仍对得上原文。
+fn leak_hit(text: &str, terms: &[String], exceptions: &[String]) -> Option<(usize, String)> {
+    let mut masked = text.to_string();
+    for ex in exceptions.iter().filter(|e| !e.is_empty()) {
+        masked = masked.replace(ex.as_str(), &" ".repeat(ex.len()));
+    }
+    first_hit(terms, &masked)
+}
+
+/// 揭示计划草稿的泄露词里，已写章节在揭开之前就写出来的：每个词和它第一次出现的章号。
+/// 读者早就见过的名字当了泄露词，体检会误报，写正文时还会被列进禁区，所以采纳前要让作者看到。
+pub fn early_terms(d: &BookData, terms: &[String], exceptions: &[String], reveal_at: Option<i64>) -> Vec<(String, i64)> {
+    let stop = reveal_at.and_then(|n| d.chapters.iter().position(|c| d.number(c) == Some(n))).unwrap_or(d.chapters.len());
+    let mut out: Vec<(String, i64)> = Vec::new();
+    for c in &d.chapters[..stop] {
+        let Some(n) = d.number(c).filter(|_| !c.content.trim().is_empty()) else { continue };
+        for t in terms {
+            if !out.iter().any(|(k, _)| k == t) && leak_hit(&c.content, std::slice::from_ref(t), exceptions).is_some() {
+                out.push((t.clone(), n));
+            }
+        }
+    }
+    out
+}
+
+fn reveals(d: &BookData, out: &mut Vec<Finding>) {
+    let chapters = written(d);
+    let last = chapters.iter().rev().find_map(|c| d.number(c)).unwrap_or(0);
+    let pos = |id: i64| d.chapters.iter().position(|c| c.id == id);
+    let pos_of = |n: i64| d.chapters.iter().position(|c| d.number(c) == Some(n));
+    for r in d.active_reveals() {
+        let events = d.reveal_events_before(r, None);
+        let revealed = events.iter().find(|e| e.step == "reveal");
+        let reveal_num = revealed.and_then(|e| d.event_number(e)).or(r.reveal_at);
+        // 揭开那一章及以后可以写；计划的揭开章还没写到时，已写的章节都在揭开之前
+        let reveal_pos = revealed.and_then(|e| pos(e.chapter_id)).or_else(|| r.reveal_at.and_then(pos_of));
+        let seed_pos = events.iter().filter(|e| e.step != "reveal").find_map(|e| pos(e.chapter_id)).or_else(|| r.seed_at.or(r.clue_at).and_then(pos_of));
+        let terms = r.term_list();
+        if !terms.is_empty() && reveal_num.is_some() {
+            let exceptions = r.exception_list();
+            let when = reveal_num.map_or_else(String::new, |n| format!("计划第{n}章才揭开"));
+            let mut hinted = false;
+            for c in &chapters {
+                let Some(cp) = pos(c.id) else { continue };
+                if reveal_pos.is_some_and(|rp| cp >= rp) {
+                    break;
+                }
+                let Some((at, kw)) = leak_hit(&c.content, &terms, &exceptions) else { continue };
+                let quote = sentence_at(&c.content, at);
+                if out.iter().any(|f| f.chapter_id == Some(c.id) && f.quote == quote) {
+                    continue;
+                }
+                let mut f = if seed_pos.is_some_and(|sp| cp >= sp) {
+                    // 埋过种子之后、揭开之前出现泄露词，可能是有意的线索，只提醒第一处
+                    if hinted {
+                        continue;
+                    }
+                    hinted = true;
+                    finding("warn", "提前点破", format!("{}出现了「{kw}」，秘密「{}」{when}：这里是线索，还是已经说破了？", d.label(c), r.title.trim()))
+                } else {
+                    finding("critical", "设定超前", format!("{}出现了「{kw}」，秘密「{}」{when}，这一章之前还没埋过种子", d.label(c), r.title.trim()))
+                };
+                f.chapter_id = Some(c.id);
+                f.reveal_id = Some(r.id);
+                f.quote = quote;
+                out.push(f);
+            }
+        }
+        if revealed.is_some() {
+            continue;
+        }
+        let latest = events.iter().rev().find_map(|e| d.event_number(e));
+        if let Some(l) = latest.filter(|l| last - l >= QUIET_REVEAL_CHAPTERS) {
+            let mut f = finding("info", "信息进度", format!("秘密「{}」最近一次线索在第{l}章，已经 {} 章没再提，读者可能忘了它", r.title.trim(), last - l));
+            f.reveal_id = Some(r.id);
+            out.push(f);
+        }
+        if let Some(rn) = r.reveal_at {
+            let mut f = if rn < last {
+                finding("warn", "揭示逾期", format!("秘密「{}」计划第{rn}章揭开，现在写到第{last}章还没揭开：按计划揭开，或者把计划往后挪", r.title.trim()))
+            } else if rn > last && rn - last <= WARM_UP_AHEAD && latest.map_or(true, |l| rn - l >= COLD_REVEAL_CHAPTERS) {
+                let why = match latest {
+                    Some(l) => format!("最近一次线索在第{l}章，隔了 {} 章", rn - l),
+                    None => "前面还没埋过种子、给过线索".to_string(),
+                };
+                finding("info", "记忆温度", format!("秘密「{}」计划第{rn}章揭开，{why}；揭开前先让读者想起它：再给一次线索，或让人物提起", r.title.trim()))
+            } else {
+                continue;
+            };
+            f.reveal_id = Some(r.id);
+            out.push(f);
         }
     }
 }
@@ -584,6 +690,78 @@ mod tests {
         for k in ["境界重复突破", "境界倒退", "物品去向"] {
             assert!(!kinds(&found).contains(&k), "重写后的稿子不该报「{k}」：{found:#?}");
         }
+    }
+
+    fn plan(id: i64, title: &str) -> Reveal {
+        Reveal { id, book_id: 1, title: title.into(), status: "active".into(), ..Default::default() }
+    }
+
+    fn event(id: i64, reveal_id: i64, chapter_id: i64, step: &str) -> RevealEvent {
+        RevealEvent { id, reveal_id, chapter_id, step: step.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn reveal_terms_flag_leaks_and_early_hints() {
+        let chapters = vec![
+            ch(1, "天轨护道盟的税吏来了。"),
+            ch(2, "矿道塌了。\n他抬头看见天轨又亮了一下。"),
+            ch(3, "老矿奴说，天上那道光每年会暗一次。"),
+            ch(4, "陈渊想起天轨上那些铸造的纹路。"),
+            ch(5, "天轨在动。"),
+            ch(6, "天轨原来是一条锁链。"),
+        ];
+        let mut d = book(chapters, vec![], vec![]);
+        d.reveals = vec![Reveal { terms: "天轨".into(), exceptions: "天轨护道盟".into(), seed_at: Some(3), reveal_at: Some(6), ..plan(1, "天上那道光的来历") }];
+        let found = check(&d);
+        let leak: Vec<&Finding> = found.iter().filter(|f| f.reveal_id == Some(1)).collect();
+        assert_eq!(leak.len(), 2, "{found:#?}");
+        assert_eq!((leak[0].kind.as_str(), leak[0].level.as_str(), leak[0].chapter_id), ("设定超前", "critical", Some(2)));
+        assert_eq!(leak[0].quote, "他抬头看见天轨又亮了一下。");
+        assert!(leak[0].message.contains("计划第6章才揭开"), "{}", leak[0].message);
+        assert_eq!((leak[1].kind.as_str(), leak[1].chapter_id), ("提前点破", Some(4)), "埋种子之后只提醒第一处，第5章不再报，揭开那章不报");
+
+        d.reveal_events = vec![event(1, 1, 2, "seed")];
+        let found = check(&d);
+        let kinds: Vec<(&str, Option<i64>)> = found.iter().filter(|f| f.reveal_id == Some(1)).map(|f| (f.kind.as_str(), f.chapter_id)).collect();
+        assert_eq!(kinds, vec![("提前点破", Some(2))], "定稿记下第2章埋了种子，那一处就算线索");
+
+        d.reveals[0].reveal_at = None;
+        d.reveal_events.clear();
+        assert!(check(&d).iter().all(|f| f.reveal_id.is_none()), "没有揭开时间也没揭开过，判断不了");
+    }
+
+    #[test]
+    fn early_terms_in_written_chapters() {
+        let chapters = vec![ch(1, "陈渊的太虚梦潮又转了一圈。天轨护道盟来收天寿税。"), ch(2, "他看见伪神的影子。"), ch(3, "伪神原来是铸天者。")];
+        let d = book(chapters, vec![], vec![]);
+        let all = split_terms("太虚梦潮、伪神、天轨、铸天者");
+        let pair = |t: &str, n: i64| (t.to_string(), n);
+        assert_eq!(early_terms(&d, &all, &split_terms("天轨护道盟"), Some(3)), vec![pair("太虚梦潮", 1), pair("伪神", 2)], "揭开那章起不算，例外说法不算");
+        assert_eq!(early_terms(&d, &all, &[], Some(3)), vec![pair("太虚梦潮", 1), pair("天轨", 1), pair("伪神", 2)]);
+        assert_eq!(early_terms(&d, &split_terms("铸天者"), &[], Some(40)), vec![pair("铸天者", 3)], "揭开的章还没写到，已写的都在揭开之前");
+        assert_eq!(early_terms(&d, &split_terms("铸天者"), &[], None), vec![pair("铸天者", 3)], "没定揭开时间也照样提醒：禁区里同样会列这些词");
+    }
+
+    #[test]
+    fn reveal_progress_checks() {
+        let chapters = (1..=10).map(|i| ch(i, "矿道里很黑。")).collect();
+        let mut d = book(chapters, vec![], vec![]);
+        d.reveals = vec![
+            plan(1, "沉寂的秘密"),
+            Reveal { reveal_at: Some(5), ..plan(2, "逾期的秘密") },
+            Reveal { reveal_at: Some(13), ..plan(3, "冷掉的秘密") },
+            Reveal { reveal_at: Some(50), ..plan(4, "还早的秘密") },
+            Reveal { reveal_at: Some(3), ..plan(5, "揭开了的秘密") },
+            Reveal { reveal_at: Some(12), ..plan(6, "没埋过种子的秘密") },
+        ];
+        d.reveal_events = vec![event(1, 1, 1, "seed"), event(2, 3, 2, "clue"), event(3, 5, 3, "reveal"), event(4, 2, 9, "clue")];
+        let found = check(&d);
+        let got: Vec<(i64, &str)> = found.iter().filter_map(|f| f.reveal_id.map(|id| (id, f.kind.as_str()))).collect();
+        assert_eq!(got, vec![(1, "信息进度"), (2, "揭示逾期"), (3, "信息进度"), (3, "记忆温度"), (6, "记忆温度")], "{found:#?}");
+        let cold = found.iter().find(|f| f.reveal_id == Some(3) && f.kind == "记忆温度").unwrap();
+        assert!(cold.message.contains("计划第13章揭开，最近一次线索在第2章，隔了 11 章"), "{}", cold.message);
+        let fresh = found.iter().find(|f| f.reveal_id == Some(6)).unwrap();
+        assert!(fresh.message.contains("前面还没埋过种子"), "{}", fresh.message);
     }
 
     #[test]
