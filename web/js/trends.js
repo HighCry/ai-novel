@@ -141,17 +141,17 @@ export function openTrends(tab = 'memes') {
     };
     const stamp = h('span', { class: 'muted small' });
     const out = h('div');
+    // [类别, 值]：只看这个题材、书名词或卖点标签的书
+    let filter = null;
     pane.replaceChildren(
       h('div', { class: 'row' },
         seg([['qidian', '起点'], ['fanqie', '番茄']], rk.platform, (v) => pick({ platform: v })),
+        seg([[1, '男频'], [0, '女频']], rk.gender, (g) => {
+          const own = fanqieCats.filter((c) => c.gender === g);
+          pick({ gender: g, category: own.some((c) => c.id === rk.category) ? rk.category : own[0]?.id || DEFAULT_CAT[g] });
+        }),
         fanqie
-          ? [
-            seg([[1, '男频'], [0, '女频']], rk.gender, (g) => {
-              const own = fanqieCats.filter((c) => c.gender === g);
-              pick({ gender: g, category: own.some((c) => c.id === rk.category) ? rk.category : own[0]?.id || DEFAULT_CAT[g] });
-            }),
-            seg([[2, '阅读榜'], [1, '新书榜']], rk.list, (l) => pick({ list: l })),
-            catSel]
+          ? [seg([[2, '阅读榜'], [1, '新书榜']], rk.list, (l) => pick({ list: l })), catSel]
           : h('select', { onchange: (e) => pick({ kind: e.target.value }) }, QIDIAN_KINDS.map(([k, label]) => h('option', { value: k, selected: k === rk.kind }, label))),
         h('span', { class: 'spacer' }),
         stamp,
@@ -162,8 +162,9 @@ export function openTrends(tab = 'memes') {
     async function load(refresh = false) {
       const seq = ++rankSeq;
       stamp.textContent = '';
-      out.replaceChildren(h('div', { class: 'boot' }, fanqie ? '正在抓取番茄榜单……番茄的书名是加密字体，要对照书页学字，第一次可能要十几秒' : '正在抓取起点榜单……'));
-      const q = fanqie ? { platform: 'fanqie', gender: rk.gender, list: rk.list, category: rk.category } : { platform: 'qidian', kind: rk.kind };
+      filter = null;
+      out.replaceChildren(h('div', { class: 'boot' }, fanqie ? '正在抓取番茄榜单前 50 本……番茄的书名是加密字体，要对照书页学字，第一次可能要十几秒' : '正在抓取起点榜单前 60 本……'));
+      const q = fanqie ? { platform: 'fanqie', gender: rk.gender, list: rk.list, category: rk.category } : { platform: 'qidian', kind: rk.kind, gender: rk.gender };
       if (refresh) q.refresh = true;
       let r;
       try {
@@ -183,16 +184,36 @@ export function openTrends(tab = 'memes') {
 
     function drawTable(r) {
       const stats = r.stats || {};
-      const books = r.books || [];
-      const tags = (pairs, none) => (pairs?.length ? pairs.map(([k, n]) => h('span', { class: 'tag' }, `${k} ${n}`)) : h('span', { class: 'muted small' }, none));
+      const all = r.books || [];
+      const hit = ([kind, v], b) => (kind === 'cat' ? b.category.split('·').pop() === v : kind === 'word' ? b.title.includes(v) : (b.tags || []).includes(v));
+      const books = filter ? all.filter((b) => hit(filter, b)) : all;
+      const toggle = (kind, v) => {
+        filter = filter?.[0] === kind && filter[1] === v ? null : [kind, v];
+        drawTable(r);
+      };
+      const group = (title, kind, pairs, none) => h('div', null,
+        h('h4', null, title),
+        h('div', { class: 'tags' }, pairs?.length
+          ? pairs.map(([v, n]) => h('button', {
+            class: 'chip' + (filter?.[0] === kind && filter[1] === v ? ' on' : ''),
+            title: '只看这些书，再点一次看全部',
+            onclick: () => toggle(kind, v),
+          }, v, h('span', { class: 'tr-count' }, n)))
+          : h('span', { class: 'muted small' }, none)));
       // 起点畅销榜、阅读指数榜、新人榜没有热度数字
-      const metric = books.some((b) => b.metric);
+      const metric = all.some((b) => b.metric);
       fill(out,
-        fanqie && r.undecoded ? h('div', { class: 'notice' }, `书名和作者里还有 ${r.undecoded} 个字没认出来，显示成 □。番茄用的是加密字体，每次抓取都会对照几本书的书页学字，多点几次「重新抓取」就能认全。`) : null,
-        // 番茄一次只看一个分类，题材分布没有意义
-        h('div', { class: fanqie ? '' : 'grid2' },
-          fanqie ? null : h('div', null, h('h4', null, '题材分布'), h('div', { class: 'tags' }, tags(stats.categories, '—'))),
-          h('div', null, h('h4', null, '书名高频词'), h('div', { class: 'tags' }, tags(stats.keywords, '这份榜单的书名里没有重复出现的词')))),
+        r.limited ? h('div', { class: 'notice' }, `${r.limited}。现在显示的是上次抓到的榜单。`) : null,
+        fanqie && r.undecoded ? h('div', { class: 'notice' }, `书名和作者里还有 ${r.undecoded} 个字没认出来，显示成 □。${r.paused
+          ? `番茄暂时限制了书页访问，认字先停一下，${r.paused} 分钟后再打开会接着认。`
+          : '番茄用的是加密字体，为了不被限流每次只对照一部分书页学字，过十分钟再打开会认出更多。'}`) : null,
+        h('div', { class: 'muted small' }, `前 ${stats.count ?? all.length} 本的统计，数字是出现在几本书里；点一下只看这些书。`),
+        h('div', { class: 'tr-stats' },
+          // 番茄一次只看一个分类，题材分布没有意义
+          fanqie ? null : group('题材分布', 'cat', stats.categories, '—'),
+          group('书名高频词', 'word', stats.keywords, '书名里没有重复出现的词'),
+          group('卖点标签', 'tag', stats.tags, fanqie ? '简介里没有重复出现的卖点标签' : '起点的简介里很少写卖点标签')),
+        filter ? h('div', { class: 'row tight small' }, `只看「${filter[1]}」：${books.length} 本`, h('button', { class: 'mini', onclick: () => toggle(...filter) }, '看全部')) : null,
         h('div', { class: 'tr-scroll' },
           h('table', { class: 'table td-table' },
             h('tr', null, ['#', '书名', '作者', '分类', '字数', metric ? (fanqie ? '在读' : '热度') : null, fanqie ? '状态' : null, '简介'].filter(Boolean).map((t) => h('th', null, t))),
@@ -218,12 +239,12 @@ export function openTrends(tab = 'memes') {
     const key = `trendsPref:${book.id}`;
     const out = h('div');
     const runBtn = h('button', { class: 'btn primary', onclick: () => busy(runBtn, run, '正在抓榜单、让 AI 分析…') }, '按当前榜单预测');
-    const basis = book.platform === 'fanqie'
-      ? '番茄同题材的阅读榜和新书榜'
-      : book.platform === 'qidian' ? '起点的月票榜、阅读指数榜和新人榜' : '起点的月票榜、阅读指数榜、新人榜和番茄同题材的榜单';
+    const qidian = '起点同频道（男频或女频）的月票榜、阅读指数榜和新人榜（各前 60 本）';
+    const fanqieBasis = '番茄同题材的阅读榜和新书榜（各前 50 本）';
+    const basis = book.platform === 'fanqie' ? fanqieBasis : book.platform === 'qidian' ? qidian : `${qidian}，以及${fanqieBasis}`;
     pane.replaceChildren(
       bookBar(runBtn),
-      h('div', { class: 'muted small' }, `取${basis}作依据，让 AI 总结读者当下的偏好，评估这本书的契合度，并给出书名、简介、开篇等的改法。结果是基于榜单快照的估计，仅供参考。`),
+      h('div', { class: 'muted small' }, `取${basis}作依据，先统计题材分布、书名高频词和卖点标签，再让 AI 总结读者当下的偏好，评估这本书的契合度，并给出书名、简介、开篇等的改法。结果是基于榜单快照的估计，仅供参考。`),
       out);
 
     async function run() {

@@ -640,6 +640,9 @@ textarea.streaming, .out-text.streaming { animation: stream-glow 1.8s ease-in-ou
 .tr-hot-list > div { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border-bottom: 1px dashed var(--border); }
 .tr-word { flex: 1; min-width: 0; }
 .tr-n { min-width: 1.6em; text-align: right; }
+.tr-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 16px; margin-bottom: 6px; }
+.tr-stats h4 { margin: 10px 0 6px; }
+.tr-count { margin-left: 4px; font-size: 11px; opacity: .65; }
 .tr-list { margin: 4px 0; padding-left: 1.2em; }
 .tr-list li { margin: 4px 0; }
 /* 表格的宽度不往外撑，手机上弹窗才不会被撑出屏幕 */

@@ -1028,10 +1028,10 @@ async fn trends_from_cache() {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let hot = json!([{ "source": "微博", "word": "情绪价值", "heat": 900, "tag": "热" }, { "source": "抖音", "word": "班味", "heat": 5, "tag": "" }]);
     db.set_kv("trend:hot", &json!({ "at": at, "data": hot }).to_string()).unwrap();
-    let rank = |title: &str, cat: &str| json!({ "rank": 1, "title": title, "author": "某人", "category": cat, "words": "100万字", "metric": "1万月票", "status": "", "desc": "少年得到系统" });
+    let rank = |title: &str, cat: &str, tags: &[&str]| json!({ "rank": 1, "title": title, "author": "某人", "category": cat, "words": "100万字", "metric": "1万月票", "status": "", "desc": "少年得到系统", "tags": tags });
     for kind in ["yuepiao", "readindex", "newauthor"] {
-        let books = json!([rank("开局签到系统", "玄幻·东方玄幻"), rank("我的系统能开局", "玄幻·东方玄幻"), rank("仙途", "仙侠·古典仙侠")]);
-        db.set_kv(&format!("trend:qidian:{kind}"), &json!({ "at": at, "data": books }).to_string()).unwrap();
+        let books = json!([rank("开局签到系统", "玄幻·东方玄幻", &["无系统", "爽文"]), rank("我的系统能开局", "玄幻·东方玄幻", &["爽文"]), rank("仙途", "仙侠·古典仙侠", &[])]);
+        db.set_kv(&format!("trend:qidian:m:{kind}:60"), &json!({ "at": at, "data": books }).to_string()).unwrap();
     }
     let addr = spawn(build_router(AppState::new(db, None))).await;
     let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
@@ -1044,6 +1044,7 @@ async fn trends_from_cache() {
     assert_eq!(r["books"][0]["title"], "开局签到系统", "不认识的榜单类型按月票榜");
     assert_eq!(r["stats"]["categories"][0], json!(["东方玄幻", 2]));
     assert!(r["stats"]["keywords"].as_array().unwrap().contains(&json!(["开局", 2])), "{}", r["stats"]);
+    assert_eq!((r["stats"]["tags"].clone(), r["stats"]["count"].clone()), (json!([["爽文", 2]]), json!(3)));
 
     let id = c.post("/api/books", json!({ "title": "测试书", "genre": "玄幻", "platform": "qidian", "synopsis": "少年得到签到系统" })).await["id"].as_i64().unwrap();
     let (status, _) = c.send(reqwest::Method::POST, "/api/trends/memes", Some(json!({ "book_id": id + 100 }))).await;
@@ -1058,7 +1059,8 @@ async fn trends_from_cache() {
     assert_eq!(pref["result"]["score"], 100, "字符串分数转成整数并夹到 0～100");
     let basis = pref["basis"].as_str().unwrap();
     assert!(basis.contains("起点月票榜") && !basis.contains("番茄"), "起点的书只看起点榜单：{basis}");
-    assert!(seen.lock().unwrap().last().unwrap()["messages"].to_string().contains("我的系统能开局"));
+    let sent = seen.lock().unwrap().last().unwrap()["messages"].to_string();
+    assert!(sent.contains("我的系统能开局") && sent.contains("卖点标签：爽文 2"), "榜单明细和整份统计都要发给模型");
 
     let usage = c.get(&format!("/api/books/{id}/declaration")).await["usage"].clone();
     let group = |task: &str| usage.as_array().unwrap().iter().find(|u| u["tasks"].as_array().unwrap().contains(&json!(task))).map(|u| u["category"].as_str().unwrap().to_string());
