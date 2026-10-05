@@ -2,6 +2,8 @@ pub mod ai;
 pub mod api;
 pub mod backup;
 pub mod declare;
+pub mod replace;
+pub mod timeline;
 pub mod continuity;
 pub mod db;
 pub mod export;
@@ -51,6 +53,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/books/{id}/publish", post(publish_chapters))
         .route("/books/{id}/declaration", get(declare::declaration))
         .route("/books/{id}/creation_log", get(declare::creation_log))
+        .route("/books/{id}/search", post(replace::search))
+        .route("/books/{id}/replace", post(replace::replace))
+        .route("/books/{id}/timeline", get(timeline::get_timeline))
+        .route("/books/{id}/events", post(timeline::create_event))
+        .route("/events/{id}", patch(timeline::patch_event).delete(timeline::delete_event))
         .route("/books/{id}/volumes", get(list_volumes).post(create_volume))
         .route("/volumes/{id}", patch(patch_volume).delete(delete_volume))
         .route("/books/{id}/chapters", get(list_chapters).post(create_chapter))

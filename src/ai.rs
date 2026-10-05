@@ -590,6 +590,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                     v.insert("entries", if entries.is_empty() { "（暂无）".into() } else { entries });
                     v.insert("threads", if threads.is_empty() { "（暂无）".into() } else { threads });
                     v.insert("reveals", if reveals.is_empty() { "（暂无）".into() } else { reveals });
+                    v.insert("timeline", crate::timeline::extract_brief(d, c));
                 }
                 "check" => {
                     let opts = ComposeOpts { current: Some(c), focus_text: &c.content, instruction: "", budget: s.context_budget, include_world: true, include_outline: false };

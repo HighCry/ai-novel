@@ -4,6 +4,7 @@ import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, 
 import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
 import { openReveals, progressionEditor, revealReview } from './reveals.js';
+import { openTimeline } from './timeline.js';
 
 let genreProfiles = null;
 export async function loadGenres() {
@@ -618,6 +619,112 @@ export async function openStats() {
   });
 }
 
+// ---------------- 全书查找替换 ----------------
+
+export function openReplace({ find = '', replace = '', entryId = null } = {}) {
+  const q = h('input', { value: find, placeholder: '要查找的文字', onkeydown: (ev) => { if (ev.key === 'Enter') search(); } });
+  const rep = h('input', { value: replace, placeholder: '替换成（留空就是删掉）' });
+  const scopes = { content: true, notes: true, settings: true };
+  let caseSensitive = false;
+  const check = (label, checked, onchange, title = '') => h('label', { class: 'check', title }, h('input', { type: 'checkbox', checked, onchange: (ev) => onchange(ev.target.checked) }), label);
+  const results = h('div', { class: 'rp-results' }, h('div', { class: 'empty' }, entryId ? '正在查找旧名……' : '输入要查找的文字，按回车或点「查找」'));
+  const summary = h('span', { class: 'muted small' });
+  const goBtn = h('button', { class: 'btn primary', disabled: true, onclick: () => doReplace() }, '替换勾选的地方');
+  let groups = [];
+  let searched = '';
+  const picked = () => groups.flatMap((g) => g.hits.filter((x) => x.on).map((x) => ({ target: g.target, id: g.id, field: g.field, start: x.start, end: x.end })));
+  const refresh = () => {
+    const n = picked().length;
+    goBtn.textContent = n ? `替换勾选的 ${n} 处` : '替换勾选的地方';
+    goBtn.disabled = !n;
+  };
+
+  async function search() {
+    const query = q.value;
+    if (!query.trim()) return toast('先输入要查找的文字', 'warn');
+    try { await store.editor?.flush(); } catch { return; }
+    let r;
+    try {
+      r = await api.post(`/books/${store.book.id}/search`, { query, case_sensitive: caseSensitive, scopes: Object.keys(scopes).filter((k) => scopes[k]), entry_id: entryId });
+    } catch (e) {
+      return toast(e.message, 'error');
+    }
+    searched = query;
+    groups = r.groups.map((g) => ({ ...g, hits: g.hits.map((x) => ({ ...x, on: !x.excluded })) }));
+    const guarded = groups.reduce((a, g) => a + g.hits.filter((x) => x.excluded).length, 0);
+    summary.textContent = r.total
+      ? `找到 ${r.total} 处${r.truncated ? '（太多了，只列出这些，把关键词写长一点）' : ''}${guarded ? `，其中 ${guarded} 处在别的名字或排除短语里，默认不替换` : ''}`
+      : '';
+    draw();
+  }
+
+  function draw() {
+    results.replaceChildren();
+    if (!groups.length) results.append(h('div', { class: 'empty' }, `没有找到「${searched}」`));
+    for (const g of groups) {
+      const all = h('input', { type: 'checkbox' });
+      const boxes = g.hits.map((x) => h('input', { type: 'checkbox', checked: x.on, onchange: (ev) => { x.on = ev.target.checked; sync(); } }));
+      const sync = () => {
+        const n = g.hits.filter((x) => x.on).length;
+        all.checked = n === g.hits.length;
+        all.indeterminate = n > 0 && n < g.hits.length;
+        refresh();
+      };
+      all.onchange = () => { g.hits.forEach((x, i) => { x.on = all.checked; boxes[i].checked = all.checked; }); sync(); };
+      results.append(h('div', { class: 'rp-group' },
+        h('label', { class: 'rp-head' }, all, h('b', null, g.label), h('span', { class: 'muted small' }, `${g.field_label} · ${g.hits.length} 处`)),
+        g.hits.map((x, i) => h('label', { class: 'rp-hit' + (x.excluded ? ' guarded' : '') }, boxes[i],
+          h('span', { class: 'rp-text' }, x.before, h('mark', null, x.text), x.after),
+          x.excluded ? h('span', { class: 'muted small' }, `在「${x.excluded}」里`) : null))));
+      sync();
+    }
+    refresh();
+  }
+
+  async function doReplace() {
+    const hits = picked();
+    if (!hits.length) return;
+    if (q.value !== searched) return toast('查找的文字改过了，先重新查找一遍', 'warn');
+    const to = rep.value;
+    if (!(await confirmBox(`把勾选的 ${hits.length} 处「${searched}」${to ? `替换成「${to}」` : '删掉'}？改到正文的章节会先存快照，可以在「历史」里恢复。`, { okText: '替换' }))) return;
+    try { await store.editor?.flush(); } catch { return; }
+    let r;
+    try {
+      r = await api.post(`/books/${store.book.id}/replace`, { query: searched, replacement: to, case_sensitive: caseSensitive, hits });
+    } catch (e) {
+      return toast(e.message, 'error');
+    }
+    toast(`已替换 ${r.replaced} 处${r.chapters ? `，${r.chapters} 章先存了快照` : ''}${r.skipped ? `；${r.skipped} 处原文已经变了，没有替换` : ''}`, r.skipped ? 'warn' : 'info', 5000);
+    if (r.book) Object.assign(store.book, await api.get(`/books/${store.book.id}`));
+    await reload();
+    emit('chapters-changed');
+    emit('entries-changed');
+    emit('threads-changed');
+    await store.editor?.reloadChapter();
+    search();
+  }
+
+  modal({
+    title: '全书查找替换',
+    wide: 'xl',
+    body: h('div', { class: 'replace' },
+      h('div', { class: 'grid2' }, field('查找', q), field('替换成', rep)),
+      h('div', { class: 'row' },
+        check('正文和章名', true, (v) => { scopes.content = v; }),
+        check('章纲、摘要、总纲、卷纲', true, (v) => { scopes.notes = v; }),
+        check('设定库、伏笔、秘密台账', true, (v) => { scopes.settings = v; }),
+        check('区分大小写', false, (v) => { caseSensitive = v; }, '只对英文字母有用'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn', onclick: () => search() }, '查找')),
+      h('div', { class: 'row' }, summary, h('span', { class: 'spacer' }), goBtn),
+      results,
+      h('p', { class: 'hint' }, '每一处都可以单独取消勾选。落在别的设定名里（比如改「白山」时的「白山宗」）或这条设定的排除短语里的地方默认不勾选。')),
+    actions: [{ label: '关闭', onClick: (c) => c() }],
+  });
+  if (find) search();
+  else q.focus();
+}
+
 // ---------------- AI 使用声明 ----------------
 
 export async function openDeclaration() {
@@ -748,12 +855,14 @@ export async function openFinalize() {
   let ext;
   let tension = null;
   let plan = { reveals: [] };
+  let timeline = { events: [] };
   try {
-    [summary, ext, tension, plan] = await Promise.all([
+    [summary, ext, tension, plan, timeline] = await Promise.all([
       api.post('/ai/json', { task: 'summarize', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'extract', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'tension', book_id: store.book.id, chapter_id: ch.id }).catch(() => null),
       api.get(`/books/${store.book.id}/reveals`).catch(() => ({ reveals: [] })),
+      api.get(`/books/${store.book.id}/timeline`).catch(() => ({ events: [] })),
     ]);
   } catch (e) {
     m.body.innerHTML = '';
@@ -806,6 +915,26 @@ export async function openFinalize() {
       t.note ? h('div', { class: 'small' }, t.note) : null)));
   const reveals = revealReview(ext, plan.reveals || []);
 
+  // 时间线：本章结束时的时间、关键事件、新定下和了结的时限
+  const time = { story_time: ext.time?.story_time || '', day: Number.isFinite(ext.time?.day) && ext.time.day > 0 ? ext.time.day : null };
+  const events = (ext.events || []).filter((e) => e.title).map((e) => ({ ...e, checked: true }));
+  const deadlinesNew = (ext.deadlines_new || []).filter((d) => d.title).map((d) => ({ ...d, checked: true }));
+  const openDeadlines = (timeline.events || []).filter((e) => e.kind === 'deadline' && e.status !== 'done');
+  const deadlinesDone = (ext.deadlines_done || []).filter((d) => openDeadlines.some((x) => x.id === d.id)).map((d) => ({ ...d, checked: true }));
+  const pickRow = (item, badge, cls, ...content) => h('div', { class: 'change-item' },
+    h('input', { type: 'checkbox', checked: true, onchange: (ev) => { item.checked = ev.target.checked; } }),
+    h('div', { class: 'grow' }, h('div', { class: 'entry-head' }, h('span', { class: 'badge ' + cls }, badge)), ...content));
+  const timeRows = [
+    h('div', { class: 'grid2' },
+      field('本章结束时', h('input', { value: time.story_time, placeholder: '如：第3天傍晚', oninput: (ev) => { time.story_time = ev.target.value; } })),
+      field('故事第几天', h('input', { type: 'number', min: 1, value: time.day ?? '', oninput: (ev) => { time.day = ev.target.value ? Number(ev.target.value) : null; } }))),
+    ...events.map((e) => pickRow(e, '事件', '', h('input', { value: e.title, oninput: (ev) => { e.title = ev.target.value; } }), e.who ? h('div', { class: 'muted small' }, '相关：' + e.who) : null)),
+    ...deadlinesNew.map((d) => pickRow(d, '新时限', 'yellow',
+      h('input', { value: d.title, oninput: (ev) => { d.title = ev.target.value; } }),
+      h('div', { class: 'muted small' }, [d.who && '相关：' + d.who, d.due && '到期：' + d.due, d.due_day && `故事第 ${d.due_day} 天`].filter(Boolean).join(' · ')))),
+    ...deadlinesDone.map((d) => pickRow(d, '了结时限', 'green', h('b', null, openDeadlines.find((x) => x.id === d.id)?.title), d.note ? h('div', { class: 'small' }, d.note) : null)),
+  ];
+
   m.body.innerHTML = '';
   m.body.append(h('div', null,
     h('p', { class: 'hint' }, '核对 AI 找出的变化，取消勾选不准确的，也可以直接修改，然后点「应用」。'),
@@ -815,7 +944,9 @@ export async function openFinalize() {
     entries.length ? entryRows : h('div', { class: 'empty' }, '没有发现设定变化'),
     h('h4', null, `伏笔（新埋 ${threadsNew.length}，回收 ${threadsResolved.length}）`),
     threadsNew.length || threadsResolved.length ? [threadRows, resolvedRows] : h('div', { class: 'empty' }, '没有发现新伏笔或回收'),
-    reveals.el));
+    reveals.el,
+    h('h4', null, `时间线（事件 ${events.length}，新时限 ${deadlinesNew.length}，了结 ${deadlinesDone.length}）`),
+    timeRows));
   m.setActions([
     { label: '取消', onClick: (c) => c() },
     {
@@ -835,6 +966,10 @@ export async function openFinalize() {
             threads_resolved: threadsResolved.filter((t) => t.checked),
             relations: ext.relations || [],
             ...reveals.picked(),
+            time,
+            events: events.filter((e) => e.checked),
+            deadlines_new: deadlinesNew.filter((d) => d.checked),
+            deadlines_done: deadlinesDone.filter((d) => d.checked),
           });
           await store.editor.setStatus('done');
           await reload(['entries', 'threads', 'chapters']);
@@ -844,7 +979,8 @@ export async function openFinalize() {
           emit('chapter-loaded', store.chapter);
           close();
           const revealNote = r.reveal_steps || r.reveals_added ? `，揭示进度 ${r.reveal_steps + r.reveals_added}` : '';
-          toast(`已定稿：新增设定 ${r.created}，更新 ${r.updated}，新伏笔 ${r.threads_added}，回收 ${r.threads_resolved}${revealNote}`, 'info', 4500);
+          const timeNote = r.deadlines_added || r.deadlines_done ? `，时限新增 ${r.deadlines_added}、了结 ${r.deadlines_done}` : '';
+          toast(`已定稿：新增设定 ${r.created}，更新 ${r.updated}，新伏笔 ${r.threads_added}，回收 ${r.threads_resolved}${revealNote}${timeNote}`, 'info', 4500);
         } catch (e) {
           toast(e.message, 'error');
         }
@@ -994,7 +1130,19 @@ export function openBatchFinalize() {
         let note = '已生成摘要';
         if (o.autoApply) {
           // 计划外的新秘密要作者判断，批量时不自动建；对得上计划的揭示进度照常记下
-          const r = await api.post(`/books/${store.book.id}/apply_updates`, { chapter_id: c.id, entries: ext.entries || [], threads_new: ext.threads_new || [], threads_progressed: ext.threads_progressed || [], threads_resolved: ext.threads_resolved || [], relations: ext.relations || [], reveals: ext.reveals || [] });
+          const r = await api.post(`/books/${store.book.id}/apply_updates`, {
+            chapter_id: c.id,
+            entries: ext.entries || [],
+            threads_new: ext.threads_new || [],
+            threads_progressed: ext.threads_progressed || [],
+            threads_resolved: ext.threads_resolved || [],
+            relations: ext.relations || [],
+            reveals: ext.reveals || [],
+            time: ext.time || {},
+            events: ext.events || [],
+            deadlines_new: ext.deadlines_new || [],
+            deadlines_done: ext.deadlines_done || [],
+          });
           await api.patch(`/chapters/${c.id}`, { status: 'done' });
           note += `，设定新增 ${r.created}、更新 ${r.updated}，伏笔新增 ${r.threads_added}、回收 ${r.threads_resolved}`;
         }
@@ -1392,6 +1540,8 @@ export function openPalette() {
     ['收藏范文', () => openSaveToLibrary({ genre: store.book?.genre || '' })],
     ['作品设定', () => openBookSettings()],
     ['导出', () => openExport()],
+    ['全书查找替换（Ctrl+H）', () => openReplace({ find: store.editor?.selection().text.trim() || '' })],
+    ['时间线和时限', () => openTimeline()],
     ['统计', () => openStats()],
     ['写作手册', () => openHandbook()],
     ['提示词模板', () => openPrompts()],
@@ -1530,6 +1680,7 @@ export function openEntry(entry) {
   const e = { kind: 'character', name: '', aliases: '', description: '', state: '', immutable: '', always_include: false, role: '', visibility: '', secret: '', ...entry };
   e.fields = { ...(entry.fields || {}) };
   const isNew = !e.id;
+  const oldName = (entry.name || '').trim();
   const save = async (close) => {
     if (!e.name.trim()) return toast('名称不能为空', 'warn');
     try {
@@ -1539,7 +1690,12 @@ export function openEntry(entry) {
       emit('entries-changed');
       close();
     } catch (err) {
-      toast(err.message, 'error');
+      return toast(err.message, 'error');
+    }
+    const newName = e.name.trim();
+    if (!isNew && oldName && newName !== oldName
+      && (await confirmBox(`名称从「${oldName}」改成了「${newName}」。要在正文、章纲、摘要和其他设定里查找「${oldName}」，逐处确认后改成新名字吗？`, { okText: '查找旧名' }))) {
+      openReplace({ find: oldName, replace: newName, entryId: e.id });
     }
   };
   const actions = [];

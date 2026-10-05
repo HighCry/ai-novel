@@ -3,6 +3,7 @@ import { store, on, emit, scope, chapterLabel, modelReady } from './store.js';
 import { h, toast, busy, cleanAi, copyText, countWords, KIND, keywords, diffClauses, applyDiff } from './ui.js';
 import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations, openSkills } from './dialogs.js';
 import { openReveals, openRevealEditor } from './reveals.js';
+import { openTimeline } from './timeline.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
 const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味', proofread: '校对' };
@@ -387,6 +388,7 @@ function biblePanel(body) {
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: () => openEntry({ kind: kind === 'all' ? 'character' : kind }) }, '＋ 新建设定'),
       h('button', { class: 'btn', onclick: () => openRelations() }, '人物关系图'),
+      h('button', { class: 'btn', title: '每章结束时是故事第几天、关键事件、正文里定下的时限', onclick: () => openTimeline() }, '时间线'),
       h('button', { class: 'btn', onclick: () => openTavernImport() }, '导入酒馆卡')),
     h('input', { class: 'search', placeholder: '搜索名称、别名、描述', oninput: (e) => { query = e.target.value.trim(); render(); } }),
     kinds,

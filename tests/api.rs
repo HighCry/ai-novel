@@ -260,7 +260,10 @@ async fn full_writing_flow() {
     let applied = c.post(&format!("/api/books/{bid}/apply_updates"), extracted).await;
     assert_eq!(
         applied,
-        json!({ "created": 1, "updated": 1, "threads_added": 1, "threads_progressed": 0, "threads_resolved": 1, "relations": 1, "reveal_steps": 0, "reveals_added": 0 }),
+        json!({
+            "created": 1, "updated": 1, "threads_added": 1, "threads_progressed": 0, "threads_resolved": 1, "relations": 1, "reveal_steps": 0, "reveals_added": 0,
+            "events": 0, "deadlines_added": 0, "deadlines_done": 0,
+        }),
         "没有揭示计划时，提取出的揭示进度对不上任何秘密，不入库"
     );
     let entries = c.get(&format!("/api/books/{bid}/entries")).await;
@@ -637,6 +640,95 @@ async fn serial_publishing_and_local_checks() {
     let kinds: Vec<&str> = report["issues"].as_array().unwrap().iter().map(|i| i["kind"].as_str().unwrap()).collect();
     assert_eq!(&kinds[..2], ["敏感词", "敏感词"], "敏感词排在最前面：{kinds:?}");
     assert!(report["issues"].as_array().unwrap().iter().any(|i| i["text"] == "禁药" && i["suggestion"].as_str().unwrap().contains("违禁丹药")));
+}
+
+#[tokio::test]
+async fn find_and_replace_across_book() {
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let book = c.post("/api/books", json!({ "title": "改名", "outline": "陈渊在梦里修行。" })).await;
+    let id = book["id"].as_i64().unwrap();
+    let ch = c.post(&format!("/api/books/{id}/chapters"), json!({ "title": "第1章 陈渊醒来" })).await;
+    let ch_id = ch["id"].as_i64().unwrap();
+    c.patch(&format!("/api/chapters/{ch_id}"), json!({ "content": "陈渊醒了。\n他握紧陈渊剑。", "outline": "陈渊醒来" })).await;
+    let hero = c.post(&format!("/api/books/{id}/entries"), json!({ "kind": "character", "name": "陈渊", "fields": { "location": "陈渊的破屋" } })).await;
+    c.post(&format!("/api/books/{id}/entries"), json!({ "kind": "item", "name": "陈渊剑" })).await;
+    c.post(&format!("/api/books/{id}/threads"), json!({ "title": "陈渊的身世" })).await;
+
+    let s = c.post(&format!("/api/books/{id}/search"), json!({ "query": "陈渊", "entry_id": hero["id"] })).await;
+    let groups = s["groups"].as_array().unwrap();
+    let fields: Vec<String> = groups.iter().map(|g| format!("{}.{}", g["target"].as_str().unwrap(), g["field"].as_str().unwrap())).collect();
+    for f in ["chapter.title", "chapter.content", "chapter.outline", "book.outline", "entry.name", "entry.fields.location", "thread.title"] {
+        assert!(fields.iter().any(|x| x == f), "缺少 {f}：{fields:?}");
+    }
+    assert!(groups.iter().any(|g| g["field_label"] == "状态·位置"), "结构化状态显示中文名");
+    let hits: Vec<Value> = groups
+        .iter()
+        .flat_map(|g| g["hits"].as_array().unwrap().iter().map(move |h| (g, h)))
+        .filter(|(_, h)| h["excluded"].is_null())
+        .map(|(g, h)| json!({ "target": g["target"], "id": g["id"], "field": g["field"], "start": h["start"], "end": h["end"] }))
+        .collect();
+    let guarded = s["total"].as_u64().unwrap() as usize - hits.len();
+    assert_eq!(guarded, 2, "正文里的「陈渊剑」和设定名「陈渊剑」默认不替换");
+
+    let r = c.post(&format!("/api/books/{id}/replace"), json!({ "query": "陈渊", "replacement": "陈默", "hits": hits })).await;
+    assert_eq!((r["replaced"].as_u64(), r["skipped"].as_u64(), r["chapters"].as_u64(), r["book"].as_bool()), (Some(hits.len() as u64), Some(0), Some(1), Some(true)));
+    let chapter = c.get(&format!("/api/chapters/{ch_id}")).await;
+    assert_eq!((chapter["title"].as_str(), chapter["content"].as_str()), (Some("第1章 陈默醒来"), Some("陈默醒了。\n他握紧陈渊剑。")));
+    let notes: Vec<Value> = c.get(&format!("/api/chapters/{ch_id}/versions")).await.as_array().unwrap().iter().map(|v| v["note"].clone()).collect();
+    assert!(notes.contains(&json!("查找替换前：陈渊 → 陈默")), "{notes:?}");
+    let again = c.post(&format!("/api/books/{id}/search"), json!({ "query": "陈渊" })).await;
+    assert_eq!(again["total"], 2, "只剩下「陈渊剑」");
+
+    let stale = c.post(&format!("/api/books/{id}/replace"), json!({ "query": "陈渊", "replacement": "陈默", "hits": [{ "target": "chapter", "id": ch_id, "field": "content", "start": 0, "end": 6 }] })).await;
+    assert_eq!((stale["replaced"].as_u64(), stale["skipped"].as_u64()), (Some(0), Some(1)), "原文已经变了的地方不替换");
+}
+
+#[tokio::test]
+async fn timeline_and_deadlines() {
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let id = c.post("/api/books", json!({ "title": "时间线" })).await["id"].as_i64().unwrap();
+    let mut ids = vec![];
+    for i in 1..=3 {
+        let ch = c.post(&format!("/api/books/{id}/chapters"), json!({ "title": format!("赶路{i}") })).await;
+        c.patch(&format!("/api/chapters/{}", ch["id"]), json!({ "content": "陈渊赶路。".repeat(50) })).await;
+        ids.push(ch["id"].as_i64().unwrap());
+    }
+    let first = json!({
+        "chapter_id": ids[0],
+        "time": { "story_time": "第1天夜里", "day": 1 },
+        "events": [{ "title": "陈渊被罚下矿", "who": "陈渊" }],
+        "deadlines_new": [{ "title": "三日内交出灵铁", "who": "陈渊", "due": "第4天", "due_day": 4 }],
+    });
+    let r = c.post(&format!("/api/books/{id}/apply_updates"), first.clone()).await;
+    assert_eq!((r["events"].as_i64(), r["deadlines_added"].as_i64()), (Some(1), Some(1)));
+    let r = c.post(&format!("/api/books/{id}/apply_updates"), first).await;
+    assert_eq!(r["deadlines_added"], 0, "重新定稿不重复建时限");
+    c.post(&format!("/api/books/{id}/apply_updates"), json!({ "chapter_id": ids[2], "time": { "day": 6 } })).await;
+
+    let tl = c.get(&format!("/api/books/{id}/timeline")).await;
+    assert_eq!((tl["today"].as_i64(), tl["chapters"][0]["story_time"].as_str()), (Some(6), Some("第1天夜里")));
+    let events = tl["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "重新定稿换掉上次的事件：{events:?}");
+    let deadline = events.iter().find(|e| e["kind"] == "deadline").unwrap();
+    assert_eq!((deadline["status"].as_str(), deadline["day"].as_i64()), (Some("open"), Some(4)));
+
+    let kinds = |v: Value| v["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(kinds(c.get(&format!("/api/books/{id}/continuity")).await).contains(&"时限已过".to_string()));
+    let ctx = c.get(&format!("/api/books/{id}/context?chapter_id={}", ids[2])).await;
+    let section = ctx["sections"].as_array().unwrap().iter().find(|s| s["title"].as_str().unwrap().starts_with("时间线")).cloned().unwrap();
+    let body = section["body"].as_str().unwrap();
+    assert!(body.contains("第1天夜里（故事第 1 天）") && body.contains("三日内交出灵铁（陈渊）——第 4 天到期，还剩 3 天"), "写第3章时上一章没记时间，往前找到第1章：{body}");
+
+    c.patch(&format!("/api/events/{}", deadline["id"]), json!({ "status": "done", "done_chapter_id": ids[1] })).await;
+    assert!(!kinds(c.get(&format!("/api/books/{id}/continuity")).await).contains(&"时限已过".to_string()));
+    let extra = c.post(&format!("/api/books/{id}/events"), json!({ "kind": "deadline", "title": "七日后宗门大比", "day": 8, "chapter_id": ids[1] })).await;
+    let r = c.post(&format!("/api/books/{id}/apply_updates"), json!({ "chapter_id": ids[2], "deadlines_done": [{ "id": extra["id"], "note": "提前比完" }] })).await;
+    assert_eq!(r["deadlines_done"], 1);
+    let done = c.get(&format!("/api/books/{id}/timeline")).await["events"].as_array().unwrap().iter().find(|e| e["id"] == extra["id"]).cloned().unwrap();
+    assert_eq!((done["status"].as_str(), done["done_chapter_id"].as_i64()), (Some("done"), Some(ids[2])));
+    assert!(done["detail"].as_str().unwrap().contains("【了结】提前比完"));
 }
 
 #[tokio::test]

@@ -19,6 +19,8 @@ pub struct BookData {
     pub reveals: Vec<Reveal>,
     pub reveal_events: Vec<RevealEvent>,
     pub progressions: Vec<Progression>,
+    /// 时间线上的事件和时限
+    pub events: Vec<Event>,
     numbers: HashMap<i64, Option<i64>>,
 }
 
@@ -37,6 +39,7 @@ impl BookData {
             reveals: Vec::new(),
             reveal_events: Vec::new(),
             progressions: Vec::new(),
+            events: Vec::new(),
             numbers,
         }
     }
@@ -119,7 +122,8 @@ impl BookData {
         self.chapters.iter().find(|c| c.id == id)
     }
 
-    fn position(&self, id: i64) -> Option<usize> {
+    /// 章节在目录里的序号（从 0 开始）
+    pub(crate) fn position(&self, id: i64) -> Option<usize> {
         self.chapters.iter().position(|c| c.id == id)
     }
 
@@ -651,6 +655,11 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
         .collect();
     if !open.is_empty() {
         out.push(Section { title: "未回收的伏笔".into(), body: take_within(open, b * 8 / 100) });
+    }
+
+    let time = crate::timeline::context_lines(data, o.current);
+    if !time.is_empty() {
+        out.push(Section { title: "时间线（时间要接得上，时限到了要有交代）".into(), body: take_within(time, b * 4 / 100) });
     }
 
     // 相关前文片段：排除上一章（下面单独给结尾）

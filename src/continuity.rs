@@ -211,6 +211,7 @@ pub fn check(d: &BookData, current: Option<&Chapter>) -> Vec<Finding> {
     flush_dry(&mut dry, &mut out);
 
     out.extend(crate::logic::check(d));
+    out.extend(crate::timeline::check(d));
 
     let rank = |l: &str| match l {
         "critical" => 0,

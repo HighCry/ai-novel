@@ -79,6 +79,7 @@ pub fn load_book_data(db: &Db, book_id: i64) -> Result<BookData, AppError> {
     data.reveals = db.list_reveals(book_id)?;
     data.reveal_events = db.list_book_reveal_events(book_id)?;
     data.progressions = db.list_book_progressions(book_id)?;
+    data.events = db.list_events(book_id)?;
     Ok(data)
 }
 
@@ -321,7 +322,15 @@ pub async fn split_chapter(State(st): State<AppState>, Path(id): Path<i64>, Json
     st.db.create_version(id, &ch.content, "拆章前")?;
     ch.content = head;
     st.db.update_chapter(&ch)?;
-    let new = st.db.create_chapter(&Chapter { book_id: ch.book_id, volume_id: ch.volume_id, content: tail, status: "draft".into(), ..Default::default() })?;
+    let new = st.db.create_chapter(&Chapter {
+        book_id: ch.book_id,
+        volume_id: ch.volume_id,
+        content: tail,
+        status: "draft".into(),
+        story_time: ch.story_time.clone(),
+        story_day: ch.story_day,
+        ..Default::default()
+    })?;
     let mut ids: Vec<i64> = st.db.list_chapter_metas(ch.book_id)?.into_iter().map(|m| m.id).filter(|&x| x != new.id).collect();
     let pos = ids.iter().position(|&x| x == id).map_or(ids.len(), |p| p + 1);
     ids.insert(pos, new.id);
@@ -357,6 +366,10 @@ pub async fn merge_next_chapter(State(st): State<AppState>, Path(id): Path<i64>)
     }
     if next.published_at.is_none() {
         ch.published_at = None;
+    }
+    if next.story_day.is_some() || !next.story_time.trim().is_empty() {
+        ch.story_time = next.story_time.clone();
+        ch.story_day = next.story_day;
     }
     st.db.update_chapter(&ch)?;
     st.db.add_ai_chars(id, next.ai_chars)?;
@@ -825,6 +838,36 @@ pub struct Updates {
     pub reveals: Vec<RevealStep>,
     /// 计划外的新秘密
     pub reveals_new: Vec<RevealNew>,
+    /// 本章结束时的故事时间
+    pub time: TimeUpdate,
+    pub events: Vec<EventNew>,
+    pub deadlines_new: Vec<DeadlineNew>,
+    pub deadlines_done: Vec<ThreadResolved>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct TimeUpdate {
+    pub story_time: String,
+    pub day: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct EventNew {
+    pub title: String,
+    pub who: String,
+    pub time: String,
+    pub day: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct DeadlineNew {
+    pub title: String,
+    pub who: String,
+    pub due: String,
+    pub due_day: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1023,7 +1066,47 @@ pub async fn apply_updates(State(st): State<AppState>, Path(book_id): Path<i64>,
             reveals_added += 1;
         }
     }
+    // 时间线：本章结束时的时间、关键事件（重新定稿时换掉上次的）、新定下和了结的时限
+    let (mut events, mut deadlines_added, mut deadlines_done) = (0, 0, 0);
+    if let Some(cid) = u.chapter_id {
+        if !u.time.story_time.trim().is_empty() || u.time.day.is_some() {
+            if let Some(mut ch) = st.db.get_chapter(cid)?.filter(|c| c.book_id == book_id) {
+                ch.story_time = u.time.story_time.trim().to_string();
+                ch.story_day = u.time.day.filter(|d| *d > 0);
+                st.db.update_chapter(&ch)?;
+            }
+        }
+        let fresh: Vec<&EventNew> = u.events.iter().filter(|e| !e.title.trim().is_empty()).collect();
+        if !fresh.is_empty() {
+            st.db.delete_chapter_events(cid)?;
+        }
+        for e in fresh {
+            st.db.save_event(&Event { book_id, chapter_id: Some(cid), kind: "event".into(), title: e.title.clone(), who: e.who.clone(), story_time: e.time.clone(), day: e.day, ..Default::default() })?;
+            events += 1;
+        }
+        let existing = st.db.list_events(book_id)?;
+        for d in u.deadlines_new.iter().filter(|d| !d.title.trim().is_empty()) {
+            if existing.iter().any(|x| x.kind == "deadline" && x.status != "done" && x.title.trim() == d.title.trim()) {
+                continue;
+            }
+            st.db.save_event(&Event { book_id, chapter_id: Some(cid), kind: "deadline".into(), title: d.title.clone(), who: d.who.clone(), story_time: d.due.clone(), day: d.due_day, ..Default::default() })?;
+            deadlines_added += 1;
+        }
+        for r in &u.deadlines_done {
+            let Some(mut e) = existing.iter().find(|x| x.id == r.id && x.kind == "deadline" && x.status != "done").cloned() else { continue };
+            e.status = "done".into();
+            e.done_chapter_id = Some(cid);
+            if !r.note.trim().is_empty() {
+                e.detail = format!("{}\n【了结】{}", e.detail.trim(), r.note.trim()).trim().to_string();
+            }
+            st.db.save_event(&e)?;
+            deadlines_done += 1;
+        }
+    }
     Ok(Json(json!({
+        "events": events,
+        "deadlines_added": deadlines_added,
+        "deadlines_done": deadlines_done,
         "created": created,
         "updated": updated,
         "threads_added": threads_added,

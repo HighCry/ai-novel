@@ -2,7 +2,7 @@ import { api, streamInto } from './api.js';
 import { store, on, emit, scope, chapterLabel, reload } from './store.js';
 import { h, toast, confirmBox, promptBox, debounce, today, fmtWords, fmtTime, countWords, themeButton, moreButton, icon, pushLayer } from './ui.js';
 import { renderPanels } from './panels.js';
-import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette, openSkills } from './dialogs.js';
+import { openSettings, openBookSettings, openExport, openVersions, openStats, openPlanner, openVolume, openHandbook, openBatchFinalize, openBatchDraft, openPalette, openSkills, openReplace } from './dialogs.js';
 import { attachAssist, pref } from './assist.js';
 import { libraryButton } from './stylelib.js';
 import { openReader } from './reader.js';
@@ -46,6 +46,9 @@ export function renderEditor(root) {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       openPalette();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h' && !document.querySelector('.modal')) {
+      e.preventDefault();
+      openReplace({ find: store.editor?.selection().text.trim() || '' });
     } else if (e.key === 'Escape' && layout.matches('.show-side, .show-panel')) {
       closeDrawers();
     }

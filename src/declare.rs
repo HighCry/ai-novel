@@ -297,6 +297,8 @@ mod tests {
             has_beats: false,
             updated_at: 0,
             published_at: None,
+            story_time: String::new(),
+            story_day: None,
         }
     }
 

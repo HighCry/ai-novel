@@ -258,7 +258,27 @@ ALTER TABLE books ADD COLUMN update_target INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE books ADD COLUMN golden_finger TEXT NOT NULL DEFAULT '';
 "#;
 
-const MIGRATIONS: [&str; 7] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8];
+const SCHEMA_V9: &str = r#"
+ALTER TABLE chapters ADD COLUMN story_time TEXT NOT NULL DEFAULT '';
+ALTER TABLE chapters ADD COLUMN story_day INTEGER;
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'event',
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  who TEXT NOT NULL DEFAULT '',
+  story_time TEXT NOT NULL DEFAULT '',
+  day INTEGER,
+  status TEXT NOT NULL DEFAULT '',
+  done_chapter_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_book ON events(book_id);
+"#;
+
+const MIGRATIONS: [&str; 8] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9];
 
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
@@ -376,7 +396,8 @@ const BOOK_COLS: &str =
     "id, title, genre, platform, logline, synopsis, worldview, outline, style_guide, style_sample, target_words, created_at, updated_at, golden_finger, update_target";
 const VOL_COLS: &str = "id, book_id, title, outline, summary, sort";
 const CH_COLS: &str =
-    "id, book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics, published_at";
+    "id, book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics, published_at, story_time, story_day";
+const EVENT_COLS: &str = "id, book_id, chapter_id, kind, title, detail, who, story_time, day, status, done_chapter_id, updated_at";
 const ENTRY_COLS: &str = "id, book_id, kind, name, aliases, description, state, immutable, always_include, updated_at, role, fields, visibility, secret, exclude";
 const THREAD_COLS: &str = "id, book_id, title, detail, status, planted_chapter_id, resolved_chapter_id, updated_at, target_chapter, last_chapter_id";
 
@@ -422,6 +443,25 @@ fn chapter_row(r: &Row) -> rusqlite::Result<Chapter> {
         beats: r.get(13)?,
         metrics: json_value(r.get(14)?),
         published_at: r.get(15)?,
+        story_time: r.get(16)?,
+        story_day: r.get(17)?,
+    })
+}
+
+fn event_row(r: &Row) -> rusqlite::Result<Event> {
+    Ok(Event {
+        id: r.get(0)?,
+        book_id: r.get(1)?,
+        chapter_id: r.get(2)?,
+        kind: r.get(3)?,
+        title: r.get(4)?,
+        detail: r.get(5)?,
+        who: r.get(6)?,
+        story_time: r.get(7)?,
+        day: r.get(8)?,
+        status: r.get(9)?,
+        done_chapter_id: r.get(10)?,
+        updated_at: r.get(11)?,
     })
 }
 
@@ -733,7 +773,8 @@ impl Db {
         let mut metas = {
             let c = self.c();
             let mut st = c.prepare(
-                "SELECT id, volume_id, sort, title, status, word_count, ai_chars, length(outline) > 0, length(summary) > 0, updated_at, length(beats) > 0, published_at
+                "SELECT id, volume_id, sort, title, status, word_count, ai_chars, length(outline) > 0, length(summary) > 0, updated_at, length(beats) > 0, published_at,
+                        story_time, story_day
                  FROM chapters WHERE book_id = ?1 ORDER BY sort, id",
             )?;
             let rows = st.query_map([book_id], |r| {
@@ -751,6 +792,8 @@ impl Db {
                     updated_at: r.get(9)?,
                     has_beats: r.get(10)?,
                     published_at: r.get(11)?,
+                    story_time: r.get(12)?,
+                    story_day: r.get(13)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -782,8 +825,8 @@ impl Db {
         };
         let status = if ch.status.is_empty() { "draft" } else { ch.status.as_str() };
         c.execute(
-            "INSERT INTO chapters (book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)",
+            "INSERT INTO chapters (book_id, volume_id, sort, title, outline, content, summary, status, word_count, ai_chars, created_at, updated_at, beats, metrics, story_time, story_day)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14, ?15)",
             params![
                 ch.book_id,
                 ch.volume_id,
@@ -797,7 +840,9 @@ impl Db {
                 ch.ai_chars,
                 t,
                 ch.beats,
-                value_json(&ch.metrics)
+                value_json(&ch.metrics),
+                ch.story_time.trim(),
+                ch.story_day
             ],
         )?;
         Ok(c.last_insert_rowid())
@@ -823,7 +868,7 @@ impl Db {
     pub fn update_chapter(&self, ch: &Chapter) -> Result<()> {
         self.c().execute(
             "UPDATE chapters SET volume_id = ?2, sort = ?3, title = ?4, outline = ?5, content = ?6, summary = ?7, status = ?8,
-             word_count = ?9, updated_at = ?10, beats = ?11, metrics = ?12, published_at = ?13 WHERE id = ?1",
+             word_count = ?9, updated_at = ?10, beats = ?11, metrics = ?12, published_at = ?13, story_time = ?14, story_day = ?15 WHERE id = ?1",
             params![
                 ch.id,
                 ch.volume_id,
@@ -837,7 +882,9 @@ impl Db {
                 now(),
                 ch.beats,
                 value_json(&ch.metrics),
-                ch.published_at
+                ch.published_at,
+                ch.story_time.trim(),
+                ch.story_day
             ],
         )?;
         Ok(())
@@ -879,6 +926,8 @@ impl Db {
             "UPDATE relations SET since_chapter_id = ?2 WHERE since_chapter_id = ?1",
             "UPDATE ai_accepts SET chapter_id = ?2 WHERE chapter_id = ?1",
             "UPDATE reveal_events SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE events SET chapter_id = ?2 WHERE chapter_id = ?1",
+            "UPDATE events SET done_chapter_id = ?2 WHERE done_chapter_id = ?1",
         ] {
             tx.execute(sql, params![from, to])?;
         }
@@ -1385,6 +1434,65 @@ impl Db {
             "INSERT INTO entry_states (entry_id, chapter_id, phase, state, fields, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![entry_id, chapter_id, phase, state, map_json(fields), now()],
         )?;
+        Ok(())
+    }
+
+    // ---------- 时间线：事件和时限 ----------
+
+    pub fn list_events(&self, book_id: i64) -> Result<Vec<Event>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE book_id = ?1 ORDER BY id"))?;
+        let rows = st.query_map([book_id], event_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_event(&self, id: i64) -> Result<Option<Event>> {
+        let sql = format!("SELECT {EVENT_COLS} FROM events WHERE id = ?1");
+        Ok(self.c().query_row(&sql, [id], event_row).optional()?)
+    }
+
+    /// id 为 0 时新建，否则更新
+    pub fn save_event(&self, e: &Event) -> Result<Event> {
+        let kind = if e.kind == "deadline" { "deadline" } else { "event" };
+        let status = match (kind, e.status.as_str()) {
+            ("deadline", "done") => "done",
+            ("deadline", _) => "open",
+            _ => "",
+        };
+        let id = {
+            let c = self.c();
+            if e.id == 0 {
+                c.execute(
+                    "INSERT INTO events (book_id, chapter_id, kind, title, detail, who, story_time, day, status, done_chapter_id, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![e.book_id, e.chapter_id, kind, e.title.trim(), e.detail.trim(), e.who.trim(), e.story_time.trim(), e.day, status, e.done_chapter_id, now()],
+                )?;
+                c.last_insert_rowid()
+            } else {
+                c.execute(
+                    "UPDATE events SET book_id = ?1, chapter_id = ?2, kind = ?3, title = ?4, detail = ?5, who = ?6, story_time = ?7, day = ?8,
+                     status = ?9, done_chapter_id = ?10, updated_at = ?11 WHERE id = ?12",
+                    params![e.book_id, e.chapter_id, kind, e.title.trim(), e.detail.trim(), e.who.trim(), e.story_time.trim(), e.day, status, e.done_chapter_id, now(), e.id],
+                )?;
+                e.id
+            }
+        };
+        Ok(self.get_event(id)?.expect("刚保存的事件"))
+    }
+
+    pub fn delete_event(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM events WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// 重新定稿时先清掉这一章上次提取的事件（时限不清，可能已经被后面的章节了结）
+    pub fn delete_chapter_events(&self, chapter_id: i64) -> Result<usize> {
+        Ok(self.c().execute("DELETE FROM events WHERE chapter_id = ?1 AND kind = 'event'", [chapter_id])?)
+    }
+
+    /// 改一条状态快照的文字（查找替换用），不动它属于哪一章
+    pub fn update_entry_state(&self, s: &EntryState) -> Result<()> {
+        self.c().execute("UPDATE entry_states SET state = ?2, fields = ?3 WHERE id = ?1", params![s.id, s.state, map_json(&s.fields)])?;
         Ok(())
     }
 

@@ -273,6 +273,9 @@ const EXTRACT: &str = "下面是小说设定库的现状和最新一章正文。
 【揭示计划里还没揭开的秘密（编号. 标题｜真相｜泄露词｜计划）】
 {{reveals}}
 
+【时间线】
+{{timeline}}
+
 【{{chapter}}】
 {{content}}
 
@@ -283,8 +286,13 @@ const EXTRACT: &str = "下面是小说设定库的现状和最新一章正文。
  \"threads_resolved\":[{\"id\":1,\"note\":\"本章如何回收\"}],
  \"relations\":[{\"a\":\"人物甲\",\"b\":\"人物乙\",\"kind\":\"师徒/敌对/恋人/盟友/亲属/上下级/交易/暧昧等\",\"detail\":\"一句话说明\",\"status\":\"active/ended\"}],
  \"reveals\":[{\"id\":1,\"step\":\"seed/clue/reveal\",\"quote\":\"原文里对应的句子（原样摘录）\",\"note\":\"一句话说明这一步做了什么\"}],
- \"reveals_new\":[{\"title\":\"话题式短标题，不写答案\",\"truth\":\"真相\",\"gap\":\"好奇/惊奇/悬念\",\"quote\":\"原文\"}]}
+ \"reveals_new\":[{\"title\":\"话题式短标题，不写答案\",\"truth\":\"真相\",\"gap\":\"好奇/惊奇/悬念\",\"quote\":\"原文\"}],
+ \"time\":{\"story_time\":\"这一章结束时故事里的时间，如：第3天傍晚、入宗第二年冬\",\"day\":3},
+ \"events\":[{\"title\":\"推动主线的关键事件，一句话\",\"who\":\"相关人物，顿号分隔\",\"time\":\"发生时间\",\"day\":3}],
+ \"deadlines_new\":[{\"title\":\"正文里定下的期限或约定，如：三日内交出一百斤灵铁\",\"who\":\"相关人物\",\"due\":\"到期时间的说法\",\"due_day\":6}],
+ \"deadlines_done\":[{\"id\":1,\"note\":\"本章怎么兑现、完成或作废的\"}]}
 relations 只列这一章里新建立、发生变化或结束的关系。
+时间：day 是从故事开始算的第几天（第一章开始那天算第 1 天），接着【时间线】里上一章的天数往后推；正文没写明过了多久就按情节估计，跳过几个月、几年也换算成天数；回忆和插叙不算时间往前走，story_time 和 day 写主线当前的时间。events 只列推动主线的关键事件，最多 3 条。deadlines_new 只列正文里明确说出的期限、约定、倒计时，due_day 按天数算出到期那天；deadlines_done 只列【时间线】里有编号的时限在本章兑现、完成或作废的。
 人物用 fields 写这一章结束时的状态：location 位置，power 实力等级，body 身体状况，mind 心理状态，items 关键物品，recent 近期经历，knows 知道了哪些秘密，unaware 还不知道的重要事实；没有变化的字段留空或省略。
 reveals 只列这一章对上面的秘密确实做了的一步：seed 埋种子（顺嘴提到、没有解释），clue 给线索（人物撞见一角，读者能拼出一部分），reveal 揭开（读者知道了真相）；每条都要引用原文，拿不出原文的不要列。reveals_new 只列本章新冒出来、上面没有、要藏到后面才揭开的真相，没有就给空数组。
 只列出确实有变化的条目；状态没有变化的已有条目不要列出；不要编造正文里没有的信息。";
@@ -626,8 +634,15 @@ pub const TEMPLATES: &[Template] = &[
         id: "task.extract",
         name: "提取设定变化",
         group: "分析",
-        description: "定稿时找出人物状态变化、伏笔和揭示进度",
-        vars: &[("entries", "已有设定列表"), ("threads", "未回收伏笔列表"), ("reveals", "揭示计划里还没揭开的秘密"), V_CHAPTER, V_CONTENT],
+        description: "定稿时找出人物状态变化、伏笔、揭示进度和时间线",
+        vars: &[
+            ("entries", "已有设定列表"),
+            ("threads", "未回收伏笔列表"),
+            ("reveals", "揭示计划里还没揭开的秘密"),
+            ("timeline", "上一章结束时的故事时间和还没了结的时限"),
+            V_CHAPTER,
+            V_CONTENT,
+        ],
         text: EXTRACT,
     },
     Template {

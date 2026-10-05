@@ -96,6 +96,10 @@ pub struct Chapter {
     pub updated_at: i64,
     /// 发到平台上的时间；空表示还没发，有正文的算存稿
     pub published_at: Option<i64>,
+    /// 这一章结束时故事里的时间说法，比如「第3天傍晚」「入宗第二年冬」
+    pub story_time: String,
+    /// 这一章结束时是故事第几天（第一章开始那天算第 1 天）
+    pub story_day: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +117,33 @@ pub struct ChapterMeta {
     pub has_beats: bool,
     pub updated_at: i64,
     pub published_at: Option<i64>,
+    pub story_time: String,
+    pub story_day: Option<i64>,
+}
+
+/// 时间线上的一件事：本章发生的关键事件，或正文里定下的时限（三日内交出灵铁、七天后宗门大比）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Event {
+    pub id: i64,
+    pub book_id: i64,
+    /// 发生或定下时限的章节
+    pub chapter_id: Option<i64>,
+    /// event 事件 / deadline 时限
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    /// 相关人物，顿号分隔
+    pub who: String,
+    /// 故事里的时间说法：事件发生的时间，或时限到期的时间
+    pub story_time: String,
+    /// 故事第几天：事件发生那天，或时限到期那天
+    pub day: Option<i64>,
+    /// 时限：open 未了结 / done 已了结；事件为空
+    pub status: String,
+    /// 时限在哪一章了结
+    pub done_chapter_id: Option<i64>,
+    pub updated_at: i64,
 }
 
 impl ChapterMeta {
