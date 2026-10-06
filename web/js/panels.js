@@ -700,7 +700,7 @@ function contractCard(ch) {
   const box = h('div', { class: 'contract-card' }, h('div', { class: 'hint' }, '正在读取本章合同…'));
   api.get(`/chapters/${ch.id}/contract`).then((k) => {
     box.innerHTML = '';
-    if (!k.has_plan && !k.people.length && !k.budget) {
+    if (!k.has_plan && !k.people.length && !k.budget && !(k.facts || []).length) {
       box.append(h('p', { class: 'hint' }, '做一份揭示计划（检查 → 信息节奏）后，这里会列出本章该埋的种子、该给的线索、不能写破的秘密和人物知情。'));
       return;
     }
@@ -712,6 +712,7 @@ function contractCard(ch) {
       row('本章投放', k.delivery ? h('div', { class: 'pre small' }, k.delivery) : '本章没有安排'),
       row('禁区', lines(k.forbidden)),
       row('人物知情', lines(k.people)),
+      row('境界和物品', lines(k.facts || [])),
       row('新名词预算', k.budget ? `本章新出现的专有名词最多 ${k.budget} 个` : null));
   }).catch(() => { box.innerHTML = ''; });
   return box;

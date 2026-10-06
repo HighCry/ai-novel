@@ -590,6 +590,78 @@ fn used_in(text: &str, ks: &[String]) -> Option<String> {
     sentences(text).find(|s| ks.iter().any(|k| s.contains(k.as_str())) && USE.iter().any(|w| s.contains(w))).map(|s| clip(s, 80))
 }
 
+// ---------- 带有效区间的事实 ----------
+
+/// 一条带有效区间的事实（参考 FactTrack）：某人从第几章起是什么境界、某件物品从第几章起已经没了。
+/// 都从定稿时按章入账的快照推出来，到下一次变化为止一直有效。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Fact {
+    pub entry_id: i64,
+    pub name: String,
+    /// realm 境界 / gone 物品没了
+    pub kind: &'static str,
+    pub value: String,
+    /// 从第几章起；None 是开篇前
+    pub from: Option<i64>,
+    /// 到第几章被新的取代；None 是一直到现在
+    pub to: Option<i64>,
+    #[serde(skip)]
+    pos: Option<usize>,
+}
+
+pub fn facts(d: &BookData) -> Vec<Fact> {
+    let realms = realm_names(d);
+    let mut out = Vec::new();
+    for e in d.entries.iter().filter(|e| e.kind == "character") {
+        let mut runs: Vec<(Option<usize>, String)> = Vec::new();
+        for (c, _, txt) in snapshot_levels(d, e, &realms) {
+            if runs.last().map_or(true, |(_, v)| *v != txt) {
+                runs.push((c.and_then(|c| d.position(c.id)), txt));
+            }
+        }
+        let number = |p: Option<usize>| p.and_then(|p| d.number(&d.chapters[p]));
+        for (i, (pos, value)) in runs.iter().enumerate() {
+            let to = runs.get(i + 1).and_then(|(p, _)| number(*p));
+            out.push(Fact { entry_id: e.id, name: e.name.trim().to_string(), kind: "realm", value: value.clone(), from: number(*pos), to, pos: *pos });
+        }
+    }
+    for e in d.entries.iter().filter(|e| e.kind == "item") {
+        let ks = keys(e);
+        for c in written(d) {
+            let snap = d.states.iter().filter(|s| s.entry_id == e.id && s.chapter_id == Some(c.id) && s.phase == "end").max_by_key(|s| s.id);
+            let why = match snap {
+                Some(s) => gone_in_state(&s.text()),
+                None => gone_in_prose(&c.content, &ks),
+            };
+            if let Some(why) = why {
+                out.push(Fact { entry_id: e.id, name: e.name.trim().to_string(), kind: "gone", value: why, from: d.number(c), to: None, pos: d.position(c.id) });
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 写 current 这一章时，出场的人物和物品已经生效的事实：本章之前入账的（本章里才变的，写本章时还没变）。
+pub fn facts_at(d: &BookData, current: &Chapter, present: &[&Entry]) -> Vec<String> {
+    let Some(cur) = d.position(current.id) else { return Vec::new() };
+    let ids: HashSet<i64> = present.iter().map(|e| e.id).collect();
+    let all = facts(d);
+    let valid = |f: &&Fact| ids.contains(&f.entry_id) && f.pos.map_or(true, |p| p < cur);
+    let mut out = Vec::new();
+    for e in present.iter().filter(|e| e.kind == "character") {
+        if let Some(f) = all.iter().filter(valid).filter(|f| f.entry_id == e.id && f.kind == "realm").last() {
+            let since = f.from.map_or_else(|| "开篇前".to_string(), |n| format!("第{n}章起"));
+            out.push(format!("· {}：{}（{since}）", f.name, f.value));
+        }
+    }
+    for f in all.iter().filter(valid).filter(|f| f.kind == "gone") {
+        let since = f.from.map_or_else(String::new, |n| format!("第{n}章起"));
+        out.push(format!("· 「{}」{since}已经没了（{}），不能再拿出来用", f.name, clip(&f.value, 40)));
+    }
+    out
+}
+
 fn items(d: &BookData, out: &mut Vec<Finding>) {
     let chapters = written(d);
     for e in d.entries.iter().filter(|e| e.kind == "item") {
@@ -643,6 +715,30 @@ mod tests {
 
     fn kinds(found: &[Finding]) -> Vec<&str> {
         found.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    #[test]
+    fn facts_have_validity_intervals() {
+        let hero = person(1, "陈渊");
+        let pill = Entry { id: 2, kind: "item".into(), name: "毒灵髓".into(), ..Default::default() };
+        let snap = |id, entry_id, chapter: Option<i64>, power: &str, state: &str| EntryState {
+            id,
+            entry_id,
+            chapter_id: chapter,
+            phase: "end".into(),
+            state: state.into(),
+            fields: if power.is_empty() { Default::default() } else { [("power".to_string(), power.to_string())].into_iter().collect() },
+            ..Default::default()
+        };
+        let states = vec![snap(1, 1, None, "炼体三重", ""), snap(2, 1, Some(2), "炼体五重", ""), snap(3, 1, Some(3), "炼体五重", ""), snap(4, 1, Some(4), "炼体七重", ""), snap(5, 2, Some(3), "", "毒灵髓耗竭无存")];
+        let d = book((1..=5).map(|i| ch(i, "陈渊挖矿。")).collect(), vec![hero.clone(), pill.clone()], states);
+        let realm: Vec<(String, Option<i64>, Option<i64>)> = facts(&d).iter().filter(|f| f.kind == "realm").map(|f| (f.value.clone(), f.from, f.to)).collect();
+        assert_eq!(realm, vec![("炼体三重".into(), None, Some(2)), ("炼体五重".into(), Some(2), Some(4)), ("炼体七重".into(), Some(4), None)], "没变化的快照不切区间");
+        let at4 = facts_at(&d, d.chapter(4).unwrap(), &[&hero, &pill]);
+        assert_eq!(at4, vec!["· 陈渊：炼体五重（第2章起）".to_string(), "· 「毒灵髓」第3章起已经没了（毒灵髓耗竭无存），不能再拿出来用".to_string()]);
+        let at3 = facts_at(&d, d.chapter(3).unwrap(), &[&hero, &pill]);
+        assert!(at3.iter().all(|l| !l.contains("毒灵髓")), "第3章里才用完的，写第3章时还在：{at3:?}");
+        assert!(facts_at(&d, d.chapter(4).unwrap(), &[&hero]).iter().all(|l| !l.contains("毒灵髓")), "没出场的物品不提");
     }
 
     #[test]

@@ -844,7 +844,8 @@ pub async fn chapter_contract(State(st): State<AppState>, Path(id): Path<i64>) -
     let data = load_book_data(&st.db, ch.book_id)?;
     let cur = data.chapter(id).ok_or_else(|| not_found("章节"))?;
     let scan = format!("{}\n{}\n{}\n{}", cur.title, cur.outline, cur.beats, crate::text::tail_chars(&cur.content, 6000));
-    let present: Vec<&Entry> = memory::match_entries(data.entries_at(Some(cur)), &scan).into_iter().filter(|e| e.kind == "character").collect();
+    let matched = memory::match_entries(data.entries_at(Some(cur)), &scan);
+    let present: Vec<&Entry> = matched.iter().copied().filter(|e| e.kind == "character").collect();
     let number = data.number(cur);
     Ok(Json(json!({
         "number": number,
@@ -854,8 +855,14 @@ pub async fn chapter_contract(State(st): State<AppState>, Path(id): Path<i64>) -
         "delivery": memory::delivery(&data, cur),
         "forbidden": memory::forbidden(&data, cur),
         "people": memory::people_knowledge(&data, cur, &present),
+        "facts": crate::logic::facts_at(&data, cur, &matched),
         "budget": number.filter(|n| *n <= 10).map(|n| crate::logic::new_term_limit(Some(n))),
     })))
+}
+
+/// 境界和物品的有效区间：某人从第几章起是什么境界、到第几章被取代，某件物品从第几章起已经没了。
+pub async fn book_facts(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Vec<crate::logic::Fact>> {
+    Ok(Json(crate::logic::facts(&load_book_data(&st.db, book_id)?)))
 }
 
 #[derive(Deserialize, Default)]

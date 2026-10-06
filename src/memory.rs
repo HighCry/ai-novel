@@ -880,6 +880,12 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
         if !rels.is_empty() {
             out.push(Section { title: "人物关系".into(), body: take_within(rels, b * 6 / 100) });
         }
+        if let Some(cur) = o.current {
+            let facts = crate::logic::facts_at(data, cur, &matched);
+            if !facts.is_empty() {
+                out.push(Section { title: "境界和物品（截至上一章，按章入账）".into(), body: take_within(facts, b * 4 / 100) });
+            }
+        }
     }
 
     // 未回收伏笔
