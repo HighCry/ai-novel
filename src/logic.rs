@@ -613,15 +613,16 @@ pub fn facts(d: &BookData) -> Vec<Fact> {
     let realms = realm_names(d);
     let mut out = Vec::new();
     for e in d.entries.iter().filter(|e| e.kind == "character") {
-        let mut runs: Vec<(Option<usize>, String)> = Vec::new();
-        for (c, _, txt) in snapshot_levels(d, e, &realms) {
-            if runs.last().map_or(true, |(_, v)| *v != txt) {
-                runs.push((c.and_then(|c| d.position(c.id)), txt));
+        // 按解析出的境界和层数比，「炼体境四重」「炼体四重」算同一个
+        let mut runs: Vec<(Option<usize>, String, Level)> = Vec::new();
+        for (c, lv, txt) in snapshot_levels(d, e, &realms) {
+            if runs.last().map_or(true, |(_, _, l)| *l != lv) {
+                runs.push((c.and_then(|c| d.position(c.id)), txt, lv));
             }
         }
         let number = |p: Option<usize>| p.and_then(|p| d.number(&d.chapters[p]));
-        for (i, (pos, value)) in runs.iter().enumerate() {
-            let to = runs.get(i + 1).and_then(|(p, _)| number(*p));
+        for (i, (pos, value, _)) in runs.iter().enumerate() {
+            let to = runs.get(i + 1).and_then(|(p, _, _)| number(*p));
             out.push(Fact { entry_id: e.id, name: e.name.trim().to_string(), kind: "realm", value: value.clone(), from: number(*pos), to, pos: *pos });
         }
     }
@@ -730,10 +731,10 @@ mod tests {
             fields: if power.is_empty() { Default::default() } else { [("power".to_string(), power.to_string())].into_iter().collect() },
             ..Default::default()
         };
-        let states = vec![snap(1, 1, None, "炼体三重", ""), snap(2, 1, Some(2), "炼体五重", ""), snap(3, 1, Some(3), "炼体五重", ""), snap(4, 1, Some(4), "炼体七重", ""), snap(5, 2, Some(3), "", "毒灵髓耗竭无存")];
+        let states = vec![snap(1, 1, None, "炼体三重", ""), snap(2, 1, Some(2), "炼体五重", ""), snap(3, 1, Some(3), "炼体境五重", ""), snap(4, 1, Some(4), "炼体七重", ""), snap(5, 2, Some(3), "", "毒灵髓耗竭无存")];
         let d = book((1..=5).map(|i| ch(i, "陈渊挖矿。")).collect(), vec![hero.clone(), pill.clone()], states);
         let realm: Vec<(String, Option<i64>, Option<i64>)> = facts(&d).iter().filter(|f| f.kind == "realm").map(|f| (f.value.clone(), f.from, f.to)).collect();
-        assert_eq!(realm, vec![("炼体三重".into(), None, Some(2)), ("炼体五重".into(), Some(2), Some(4)), ("炼体七重".into(), Some(4), None)], "没变化的快照不切区间");
+        assert_eq!(realm, vec![("炼体三重".into(), None, Some(2)), ("炼体五重".into(), Some(2), Some(4)), ("炼体七重".into(), Some(4), None)], "没变化的快照不切区间，写法不同也算同一层");
         let at4 = facts_at(&d, d.chapter(4).unwrap(), &[&hero, &pill]);
         assert_eq!(at4, vec!["· 陈渊：炼体五重（第2章起）".to_string(), "· 「毒灵髓」第3章起已经没了（毒灵髓耗竭无存），不能再拿出来用".to_string()]);
         let at3 = facts_at(&d, d.chapter(3).unwrap(), &[&hero, &pill]);
