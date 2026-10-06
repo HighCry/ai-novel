@@ -329,6 +329,16 @@ impl BookData {
         self.number(ch).map_or_else(|| ch.title.trim().to_string(), |n| format!("第{n}章"))
     }
 
+    /// 主角：标成「主角」的人物；一个都没标时用第一个常驻人物。
+    pub fn protagonists(&self, current: Option<&Chapter>) -> Vec<&Entry> {
+        let people: Vec<&Entry> = self.entries_at(current).into_iter().filter(|e| e.kind == "character").collect();
+        let marked: Vec<&Entry> = people.iter().copied().filter(|e| e.role.trim() == "主角").collect();
+        if !marked.is_empty() {
+            return marked;
+        }
+        people.into_iter().find(|e| e.always_include).into_iter().collect()
+    }
+
     /// 这一章的视角人物：章纲或节拍里写了「视角：某某」「某某视角」就用那个人，否则用主角。
     pub fn pov(&self, cur: &Chapter) -> Vec<&Entry> {
         let people: Vec<&Entry> = self.entries_at(Some(cur)).into_iter().filter(|e| e.kind == "character").collect();
@@ -347,7 +357,7 @@ impl BookData {
             .map(|(_, e)| e);
         match marked {
             Some(e) => vec![e],
-            None => people.into_iter().filter(|e| e.role.trim() == "主角").collect(),
+            None => self.protagonists(Some(cur)),
         }
     }
 }
@@ -440,7 +450,7 @@ fn knowledge_item(data: &BookData, r: &Reveal, k: &Knowledge, cur: &Chapter) -> 
 
 /// 人物知情：视角人物知道、误会、不知道什么；本章出场的其他人物知道什么、还不知道视角人物知道的哪些事。
 /// 「不知道」只列读者已经知道、或者在场的人知道的，其余的禁区已经管住。读者还不知道的「惊奇」类，
-/// 除了视角人物自己知道的，都不在这里提，免得模型把知情的人写得可疑。没有角色知识的书什么都不加。
+/// 不写别人知情，免得模型把知情的人写得可疑；视角人物不知道照样列（禁区里本来就有标题）。没有角色知识的书什么都不加。
 pub fn people_knowledge(data: &BookData, cur: &Chapter, present: &[&Entry]) -> Vec<String> {
     if data.knowledge.is_empty() {
         return Vec::new();
@@ -473,7 +483,7 @@ pub fn people_knowledge(data: &BookData, cur: &Chapter, present: &[&Entry]) -> V
         let unknown: Vec<String> = reveals
             .iter()
             .filter(|r| state(p, r).is_none() && (r.reveal_at.is_none() || r.reveal_at != now))
-            .filter(|r| data.revealed_before(r, Some(cur)) || (!hidden_surprise(r) && others.iter().any(|o| knows(o, r))))
+            .filter(|r| data.revealed_before(r, Some(cur)) || others.iter().any(|o| knows(o, r)))
             .map(|r| format!("「{}」", r.title.trim()))
             .collect();
         if !unknown.is_empty() {
@@ -484,7 +494,8 @@ pub fn people_knowledge(data: &BookData, cur: &Chapter, present: &[&Entry]) -> V
             out.extend(lines);
         }
     }
-    let mut rest = Vec::new();
+    // 知情一样的人合成一行：「赵四、钱五：不知道「林凡的底牌」」
+    let mut rest: Vec<(Vec<&str>, String)> = Vec::new();
     for o in others {
         let mut parts: Vec<String> = reveals.iter().filter(|r| !hidden_surprise(r)).filter_map(|r| state(o, r).map(|k| knowledge_item(data, r, k, cur))).collect();
         let blind: Vec<String> = reveals
@@ -495,13 +506,18 @@ pub fn people_knowledge(data: &BookData, cur: &Chapter, present: &[&Entry]) -> V
         if !blind.is_empty() {
             parts.push(format!("不知道{}", blind.join("")));
         }
-        if !parts.is_empty() {
-            rest.push(format!("· {}：{}", o.name.trim(), parts.join("；")));
+        if parts.is_empty() {
+            continue;
+        }
+        let parts = parts.join("；");
+        match rest.iter_mut().find(|(_, p)| *p == parts) {
+            Some((names, _)) => names.push(o.name.trim()),
+            None => rest.push((vec![o.name.trim()], parts)),
         }
     }
     if !rest.is_empty() {
         out.push(if pov.is_empty() { "本章出场的人物：".to_string() } else { "本章出场的其他人物：".to_string() });
-        out.extend(rest);
+        out.extend(rest.into_iter().map(|(names, parts)| format!("· {}：{parts}", names.join("、"))));
     }
     out
 }
@@ -1150,7 +1166,12 @@ mod tests {
         assert_eq!(names(&ch), vec!["林凡"]);
         assert_eq!(names(&Chapter { outline: "苏雨视角：她在药铺等林凡".into(), ..ch.clone() }), vec!["苏雨"]);
         assert_eq!(names(&Chapter { beats: "1. 【视角】赵四 守在城门".into(), ..ch.clone() }), vec!["赵四"]);
-        assert_eq!(names(&Chapter { outline: "林凡的视角里，苏雨很陌生".into(), ..ch }), vec!["林凡"], "没写成标记时用主角");
+        assert_eq!(names(&Chapter { outline: "林凡的视角里，苏雨很陌生".into(), ..ch.clone() }), vec!["林凡"], "没写成标记时用主角");
+        let mut unmarked = knowing();
+        unmarked.entries[0].role.clear();
+        assert!(unmarked.pov(&ch).is_empty(), "没标主角、也没有常驻人物时不猜");
+        unmarked.entries[3].always_include = true;
+        assert_eq!(unmarked.pov(&ch).into_iter().map(|e| e.name.clone()).collect::<Vec<_>>(), vec!["赵四"], "没标主角时用常驻人物");
     }
 
     #[test]
@@ -1166,7 +1187,7 @@ mod tests {
         let want2 = [
             "视角人物「林凡」：",
             "· 知道「林凡的底牌」（本来就知道）：能看见别人头顶的寿数",
-            "· 不知道：「玉佩的来历」——他说不出、想不到、用不上这些，旁白也不替他点破",
+            "· 不知道：「玉佩的来历」「苏雨的身份」——他说不出、想不到、用不上这些，旁白也不替他点破",
             "本章出场的其他人物：",
             "· 苏雨：不知道「林凡的底牌」",
             "· 赵四：知道「玉佩的来历」（第1章，推断）；不知道「林凡的底牌」",
@@ -1174,7 +1195,7 @@ mod tests {
         for want in want2 {
             assert!(ch2.contains(want), "缺少「{want}」：\n{ch2}");
         }
-        for leak in ["上古仙帝", "魔教圣女", "玉佩不是凡物", "苏雨的身份", "以为她只是医女"] {
+        for leak in ["上古仙帝", "魔教圣女", "玉佩不是凡物", "知道「苏雨的身份」", "以为她只是医女"] {
             assert!(!ch2.contains(leak), "第2章不该出现「{leak}」：\n{ch2}");
         }
 
@@ -1186,6 +1207,13 @@ mod tests {
         let su = section(4, "苏雨视角：她在药铺等林凡");
         assert!(su.contains("视角人物「苏雨」：") && su.contains("· 知道「苏雨的身份」（本来就知道）——读者还不知道，不能引人注意"), "{su}");
         assert!(!su.contains("自己是魔教圣女"), "读者还不知道的只给标题：{su}");
+
+        let mut crowd = knowing();
+        crowd.entries.push(Entry { id: 5, name: "钱五".into(), kind: "character".into(), ..Default::default() });
+        let cur = Chapter { outline: "林凡带着苏雨、钱五赶路".into(), ..crowd.chapter(2).cloned().unwrap() };
+        let present: Vec<&Entry> = crowd.entries.iter().filter(|e| e.kind == "character").collect();
+        let lines = people_knowledge(&crowd, &cur, &present);
+        assert!(lines.contains(&"· 苏雨、钱五：不知道「林凡的底牌」".to_string()), "知情一样的人合成一行：{lines:?}");
 
         let mut bare = data;
         bare.knowledge.clear();

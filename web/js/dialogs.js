@@ -3,7 +3,7 @@ import { store, emit, reload, chapterLabel } from './store.js';
 import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, fmtWords, readFile, pickFile, KIND, CHAR_FIELDS, ROLES, renderMarkdown, cleanAi, countWords, pushLayer } from './ui.js';
 import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
-import { openReveals, progressionEditor, revealReview } from './reveals.js';
+import { openReveals, progressionEditor, revealReview, knowledgeReview, logicIssues } from './reveals.js';
 import { openTimeline } from './timeline.js';
 import { openTeardown } from './teardown.js';
 import { openTrends } from './trends.js';
@@ -59,7 +59,7 @@ const TASK_NAMES = {
   continue: '续写', write_chapter: '写整章', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', proofread: '校对', free: '问编辑',
   ghost: '灰字续写', insert: '斜杠指令', names: '起名', beats: '节拍规划', deslop: '去 AI 味', simulate: '人物推演',
   chat: '角色对话', world: '世界观', outline: '总纲', synopsis: '简介', volume_outline: '卷纲', ideas: '开书方案', characters: '人物设计',
-  chapter_outlines: '章纲规划', summarize: '摘要', extract: '提取设定', check: '一致性检查', review: '审稿', volume_summary: '卷摘要',
+  chapter_outlines: '章纲规划', summarize: '摘要', extract: '提取设定', check: '一致性检查', logic_check: '逻辑审校', review: '审稿', volume_summary: '卷摘要',
   reveal_plan: '揭示计划', tension: '张力分析', first_read: '冷读者反馈', revision_plan: '修订计划', style_profile: '文风提取',
   library_analyze: '范文分析', style_distill: '提炼文风指南', teardown: '拆书', memes: '挑热梗', preference: '读者偏好预测',
 };
@@ -859,13 +859,17 @@ export async function openFinalize() {
   let tension = null;
   let plan = { reveals: [] };
   let timeline = { events: [] };
+  let rules = { findings: [] };
+  let logic = null;
   try {
-    [summary, ext, tension, plan, timeline] = await Promise.all([
+    [summary, ext, tension, plan, timeline, rules, logic] = await Promise.all([
       api.post('/ai/json', { task: 'summarize', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'extract', book_id: store.book.id, chapter_id: ch.id }),
       api.post('/ai/json', { task: 'tension', book_id: store.book.id, chapter_id: ch.id }).catch(() => null),
       api.get(`/books/${store.book.id}/reveals`).catch(() => ({ reveals: [] })),
       api.get(`/books/${store.book.id}/timeline`).catch(() => ({ events: [] })),
+      api.get(`/books/${store.book.id}/continuity?chapter_id=${ch.id}`).catch(() => ({ findings: [] })),
+      api.get(`/chapters/${ch.id}/logic`).catch(() => null),
     ]);
   } catch (e) {
     m.body.innerHTML = '';
@@ -917,6 +921,23 @@ export async function openFinalize() {
       h('div', { class: 'entry-head' }, h('span', { class: 'badge' }, '回收'), h('b', null, store.threads.find((x) => x.id === t.id)?.title)),
       t.note ? h('div', { class: 'small' }, t.note) : null)));
   const reveals = revealReview(ext, plan.reveals || []);
+  const knowing = knowledgeReview(ext, plan.reveals || [], logic);
+
+  // 规则检查（本地、免费）有严重问题时先提示；模型逻辑审校可选，结果同时存到「检查」页
+  const severe = (rules.findings || []).filter((f) => f.level === 'critical' && f.chapter_id === ch.id);
+  const ruleBox = severe.length ? h('div', { class: 'out-warn' },
+    h('b', null, `规则检查发现本章 ${severe.length} 处严重问题，建议先改再定稿：`),
+    h('ul', null, severe.map((f) => h('li', null, `${f.kind}：${f.message}`, f.quote ? h('blockquote', null, f.quote) : null)))) : null;
+  const logicBox = h('div');
+  const logicBtn = h('button', {
+    class: 'btn',
+    onclick: () => busy(logicBtn, async () => {
+      const r = await api.post('/ai/json', { task: 'logic_check', book_id: store.book.id, chapter_id: ch.id });
+      logicBox.innerHTML = '';
+      logicBox.append(logicIssues(r), h('p', { class: 'hint' }, '结果已存到「检查」页，在那里可以点原文定位，或者一键替换问题句。'));
+      knowing.flag(r);
+    }, '审校中…'),
+  }, '逻辑审校本章（AI，可选）');
 
   // 时间线：本章结束时的时间、关键事件、新定下和了结的时限
   const time = { story_time: ext.time?.story_time || '', day: Number.isFinite(ext.time?.day) && ext.time.day > 0 ? ext.time.day : null };
@@ -941,6 +962,9 @@ export async function openFinalize() {
   m.body.innerHTML = '';
   m.body.append(h('div', null,
     h('p', { class: 'hint' }, '核对 AI 找出的变化，取消勾选不准确的，也可以直接修改，然后点「应用」。'),
+    ruleBox,
+    h('div', { class: 'row' }, logicBtn, h('span', { class: 'hint' }, '查超前揭示、人物越知、视角越权、因果缺口和状态矛盾，用写作模型')),
+    logicBox,
     tensionBox,
     field('本章摘要（已保存）', summaryBox),
     h('h4', null, `设定变化（${entries.length}）`),
@@ -948,6 +972,7 @@ export async function openFinalize() {
     h('h4', null, `伏笔（新埋 ${threadsNew.length}，回收 ${threadsResolved.length}）`),
     threadsNew.length || threadsResolved.length ? [threadRows, resolvedRows] : h('div', { class: 'empty' }, '没有发现新伏笔或回收'),
     reveals.el,
+    knowing.el,
     h('h4', null, `时间线（事件 ${events.length}，新时限 ${deadlinesNew.length}，了结 ${deadlinesDone.length}）`),
     timeRows));
   m.setActions([
@@ -969,6 +994,7 @@ export async function openFinalize() {
             threads_resolved: threadsResolved.filter((t) => t.checked),
             relations: ext.relations || [],
             ...reveals.picked(),
+            knowledge: knowing.picked(),
             time,
             events: events.filter((e) => e.checked),
             deadlines_new: deadlinesNew.filter((d) => d.checked),
@@ -981,7 +1007,7 @@ export async function openFinalize() {
           emit('chapters-changed');
           emit('chapter-loaded', store.chapter);
           close();
-          const revealNote = r.reveal_steps || r.reveals_added ? `，揭示进度 ${r.reveal_steps + r.reveals_added}` : '';
+          const revealNote = (r.reveal_steps || r.reveals_added ? `，揭示进度 ${r.reveal_steps + r.reveals_added}` : '') + (r.knowledge ? `，人物知情 ${r.knowledge}` : '');
           const timeNote = r.deadlines_added || r.deadlines_done ? `，时限新增 ${r.deadlines_added}、了结 ${r.deadlines_done}` : '';
           toast(`已定稿：新增设定 ${r.created}，更新 ${r.updated}，新伏笔 ${r.threads_added}，回收 ${r.threads_resolved}${revealNote}${timeNote}`, 'info', 4500);
         } catch (e) {
@@ -1132,7 +1158,7 @@ export function openBatchFinalize() {
         ]);
         let note = '已生成摘要';
         if (o.autoApply) {
-          // 计划外的新秘密要作者判断，批量时不自动建；对得上计划的揭示进度照常记下
+          // 计划外的新秘密要作者判断，批量时不自动建；对得上计划的揭示进度和人物知情照常记下
           const r = await api.post(`/books/${store.book.id}/apply_updates`, {
             chapter_id: c.id,
             entries: ext.entries || [],
@@ -1141,6 +1167,7 @@ export function openBatchFinalize() {
             threads_resolved: ext.threads_resolved || [],
             relations: ext.relations || [],
             reveals: ext.reveals || [],
+            knowledge: ext.knowledge || [],
             time: ext.time || {},
             events: ext.events || [],
             deadlines_new: ext.deadlines_new || [],
@@ -1206,6 +1233,7 @@ export async function openRelations() {
   const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'rel-graph' });
   const list = h('div', { class: 'rel-list' });
   const name = (id) => store.entries.find((e) => e.id === id)?.name || '？';
+  const endedAt = (r) => store.chapters.find((c) => c.id === r.until_chapter_id)?.number;
   const reload = async () => { rels = await api.get(`/books/${store.book.id}/relations`); draw(); };
 
   function draw() {
@@ -1249,7 +1277,7 @@ export async function openRelations() {
     for (const r of rels) {
       list.append(h('div', { class: 'rel-row' + (r.status === 'ended' ? ' ended' : '') },
         h('b', null, `${name(r.a_id)} — ${name(r.b_id)}`), h('span', { class: 'tag' }, r.kind), h('span', { class: 'muted small grow' }, r.detail || ''),
-        r.status === 'ended' ? h('span', { class: 'badge' }, '已结束') : null,
+        r.status === 'ended' ? h('span', { class: 'badge' }, endedAt(r) ? `第${endedAt(r)}章结束` : '已结束') : null,
         h('button', { class: 'mini', onclick: () => editRelation(r) }, '编辑'),
         h('button', { class: 'mini danger', onclick: async () => { await api.del(`/relations/${r.id}`); reload(); } }, '删除')));
     }
@@ -1262,7 +1290,9 @@ export async function openRelations() {
       body: h('div', null,
         field('关系', h('input', { value: x.kind, oninput: (e) => { x.kind = e.target.value; } })),
         field('说明', h('input', { value: x.detail, oninput: (e) => { x.detail = e.target.value; } })),
-        field('状态', select([['active', '进行中'], ['ended', '已结束（决裂、死亡、分手等）']], x.status, (v) => { x.status = v; }))),
+        field('状态', select([['active', '进行中'], ['ended', '已结束（决裂、死亡、分手等）']], x.status, (v) => { x.status = v; })),
+        field('在哪一章结束', select([['', '不确定'], ...store.chapters.filter((c) => c.number != null).map((c) => [c.id, chapterLabel(c)])], x.until_chapter_id ?? '', (v) => { x.until_chapter_id = v ? Number(v) : null; }),
+          '已结束时才用：回改这一章和之前的章节时，仍按关系还在写')),
       actions: [{ label: '取消', onClick: (c) => c() }, { label: '保存', class: 'primary', onClick: async (c) => { await api.patch(`/relations/${r.id}`, x); c(); reload(); } }],
     });
   }

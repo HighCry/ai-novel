@@ -2,7 +2,7 @@ import { api, stream } from './api.js';
 import { store, on, emit, scope, chapterLabel, modelReady } from './store.js';
 import { h, toast, busy, cleanAi, copyText, countWords, KIND, keywords, diffClauses, applyDiff } from './ui.js';
 import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations, openSkills } from './dialogs.js';
-import { openReveals, openRevealEditor } from './reveals.js';
+import { openReveals, openRevealEditor, logicIssues } from './reveals.js';
 import { openTimeline } from './timeline.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
@@ -459,11 +459,52 @@ function checkPanel(body) {
       h('button', { class: 'btn', onclick: () => openReveals() }, '信息节奏：秘密什么时候埋种子、给线索、揭开'),
       h('button', { class: 'btn', onclick: needChapter(runLint) }, '文字质量：套话、AI 腔、跨章重复（本地，免费）'),
       h('button', { class: 'btn', onclick: needChapter(runConsistency) }, '设定一致性检查（AI）'),
+      h('button', { class: 'btn', onclick: needChapter(runLogic) }, '逻辑审校（AI）：超前揭示、人物越知、视角越权'),
       h('button', { class: 'btn', onclick: needChapter(runReview) }, '编辑审稿打分（AI）'),
       h('button', { class: 'btn', onclick: needChapter((o) => runText(o, 'first_read', '冷读者反馈：一个没看过设定的读者怎么看这一章')) }, '冷读者反馈（AI）'),
       h('button', { class: 'btn', onclick: needChapter((o) => runText(o, 'revision_plan', '修订计划', o.dataset.feedback || '')) }, '生成修订计划（AI，会参考下面已有的检查结果）'),
       h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, () => runSubmission(out), '检查中…') }, '全书投稿检查')),
+    lastLogic(ch, out),
     out);
+}
+
+/** 这一章上次逻辑审校的结果（定稿时做的也算）：一行提示加「查看」 */
+function lastLogic(ch, out) {
+  const line = h('div', { class: 'hint' });
+  if (!ch) return line;
+  api.get(`/chapters/${ch.id}/logic`).then((r) => {
+    if (!r || !Array.isArray(r.issues)) return;
+    const when = new Date(r.at * 1000).toLocaleString();
+    line.append(`上次逻辑审校（${when}）：${r.issues.length ? `${r.issues.length} 处问题` : '没有问题'}${r.stale ? '，之后正文改过' : ''} `,
+      h('button', { class: 'mini', onclick: () => showLogic(out, r, r.stale) }, '查看'));
+  }).catch(() => {});
+  return line;
+}
+
+async function runLogic(out) {
+  const r = await api.post('/ai/json', { task: 'logic_check', book_id: store.book.id, chapter_id: store.chapter.id });
+  showLogic(out, r, false);
+}
+
+function showLogic(out, r, stale) {
+  out.innerHTML = '';
+  out.append(logicIssues(r, { stale, locate, replace: replaceSentence }));
+}
+
+/** 只改问题句：先存一个快照，再把原句换成审校给的改法 */
+async function replaceSentence(quote, rewrite) {
+  const i = store.editor.find(quote);
+  if (i < 0) return toast('正文里没找到这句原文（可能已经改过了）', 'warn');
+  // 模型摘原文时常漏掉首尾的引号，改法里却带着：原文旁边已经有同一个引号时去掉，免得变成两个
+  const full = store.editor.text();
+  let text = rewrite.trim();
+  if (/^[“「『]/.test(text) && !quote.startsWith(text[0]) && full[i - 1] === text[0]) text = text.slice(1);
+  if (/[”」』]$/.test(text) && !quote.endsWith(text.at(-1)) && full[i + quote.length] === text.at(-1)) text = text.slice(0, -1);
+  try { await store.editor.save(); } catch { return; }
+  if (!store.editor.replaceRange(i, i + quote.length, text, quote)) return;
+  store.editor.select(i, i + text.length);
+  await store.editor.save({ snapshot: '逻辑审校替换前' });
+  toast('已替换这句（替换前已存快照，可以在「历史」里恢复）');
 }
 
 function locate(text) {

@@ -610,7 +610,7 @@ fn normalize_gap(gap: &str) -> String {
 }
 
 /// 秘密列表，附每条的揭示进度（带章号）、角色知识和写到第几章，给信息节奏面板画时间条和知情表；
-/// cast 是知情表的列：主角、重要配角、反派，加上有角色知识记录的人物，主角排前面。
+/// cast 是知情表的列：主角、重要配角、反派、常驻人物，加上有角色知识记录的人物，主角排前面（hero）。
 pub async fn list_reveals(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Value> {
     require_book(&st.db, book_id)?;
     let data = load_book_data(&st.db, book_id)?;
@@ -640,10 +640,11 @@ pub async fn list_reveals(State(st): State<AppState>, Path(book_id): Path<i64>) 
             v
         })
         .collect();
+    let heroes: Vec<i64> = data.protagonists(None).into_iter().map(|e| e.id).collect();
     let mut cast: Vec<&Entry> =
         data.entries.iter().filter(|e| e.kind == "character" && (e.is_major() || data.knowledge.iter().any(|k| k.entry_id == e.id))).collect();
-    cast.sort_by_key(|e| e.role.trim() != "主角");
-    let cast: Vec<Value> = cast.into_iter().map(|e| json!({ "id": e.id, "name": e.name, "role": e.role })).collect();
+    cast.sort_by_key(|e| !heroes.contains(&e.id));
+    let cast: Vec<Value> = cast.into_iter().map(|e| json!({ "id": e.id, "name": e.name, "role": e.role, "hero": heroes.contains(&e.id) })).collect();
     Ok(Json(json!({ "reveals": reveals, "written": written, "chapters": chapters, "cast": cast })))
 }
 

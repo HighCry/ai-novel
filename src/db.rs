@@ -704,7 +704,8 @@ impl Db {
     }
 }
 
-/// 按 user_version 补齐表结构；打开库和从备份还原后都要跑一遍
+/// 按 user_version 补齐表结构；打开库和从备份还原后都要跑一遍。
+/// 每一步先拿写锁再重读版本号：两个进程同时打开新版本的库时，后到的等前一个升级完就跳过，不会重复加列。
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
@@ -714,7 +715,15 @@ fn migrate(conn: &Connection) -> Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let v = i as i64 + 2;
         if version < v {
-            conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {v}; COMMIT;"))?;
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let step = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).map_err(anyhow::Error::from).and_then(|now| {
+                if now < v {
+                    conn.execute_batch(&format!("{sql} PRAGMA user_version = {v};"))?;
+                }
+                Ok(())
+            });
+            conn.execute_batch(if step.is_ok() { "COMMIT;" } else { "ROLLBACK;" })?;
+            step?;
         }
     }
     Ok(())

@@ -144,6 +144,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .badge { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); white-space: nowrap; }
 .badge.green { background: var(--green-soft); color: var(--green); }
 .badge.gray { background: var(--surface-2); color: var(--muted); }
+.badge.yellow { background: var(--warn-soft); color: var(--warn); }
 .badge.red { background: var(--accent-soft); color: var(--danger); }
 .warn-text { color: var(--warn); }
 .gate-picker { display: inline-flex; align-items: center; gap: 4px; }
@@ -178,6 +179,21 @@ button:disabled { opacity: .55; cursor: wait; }
 .rv-event { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
 .rv-event b { white-space: nowrap; }
 .rv-drafts .change-item .row { gap: 6px; align-items: center; }
+.who-wrap { overflow-x: auto; margin-top: 8px; }
+.who-table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.who-table th, .who-table td { border: 1px solid var(--border); padding: 4px 8px; text-align: center; white-space: nowrap; }
+.who-table thead th { background: var(--surface-2); position: sticky; top: 0; }
+.who-table th.who-secret { text-align: left; font-weight: normal; white-space: normal; min-width: 9em; cursor: pointer; }
+.who-secret:hover { color: var(--accent); }
+.who-secret .tag { margin-right: 4px; }
+.who-cell { cursor: pointer; color: var(--muted); }
+.who-cell:hover { background: var(--surface-2); }
+.who-cell.knows { background: var(--green-soft); color: var(--green); }
+.who-cell.misread { background: var(--warn-soft); color: var(--warn); }
+.know-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.know-form .row { gap: 6px; align-items: center; flex-wrap: wrap; }
+.logic-rewrite { margin-top: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.logic-rewrite span { color: var(--green); }
 .prog-box { margin: 6px 0 10px; }
 .prog-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .prog-row select { width: auto; }
