@@ -15,6 +15,7 @@ pub fn check(d: &BookData) -> Vec<Finding> {
     let mut out = Vec::new();
     leaks(d, &mut out);
     reveals(d, &mut out);
+    title_leaks(d, &mut out);
     opening(d, &mut out);
     payoff_milestone(d, &mut out);
     new_terms(d, &mut out);
@@ -120,6 +121,25 @@ pub fn early_terms(d: &BookData, terms: &[String], exceptions: &[String], reveal
         }
     }
     out
+}
+
+/// 秘密的标题会原样进写正文时的投放清单和禁区，标题里带着还没开放的设定名，模型会当成能写的词。
+fn title_leaks(d: &BookData, out: &mut Vec<Finding>) {
+    let hidden: Vec<&Entry> = d.entries.iter().filter(|e| !matches!(e.gate(), crate::visibility::Gate::Public)).collect();
+    for r in d.active_reveals() {
+        let title = r.title.trim();
+        let Some((e, k)) = hidden.iter().find_map(|e| keys(e).into_iter().filter(|k| k.chars().count() >= 2).find(|k| title.contains(k.as_str())).map(|k| (*e, k))) else {
+            continue;
+        };
+        let when = if e.visibility.trim().is_empty() { "对 AI 隐藏".to_string() } else { e.visibility.trim().to_string() };
+        let mut f = finding(
+            "warn",
+            "秘密标题带出设定",
+            format!("秘密「{title}」的标题里有「{k}」（设定「{}」{when}）。写正文时标题会进投放清单和禁区，模型会当成能写的词，建议改成不带这个名字的话题", e.name.trim()),
+        );
+        f.reveal_id = Some(r.id);
+        out.push(f);
+    }
 }
 
 fn reveals(d: &BookData, out: &mut Vec<Finding>) {
@@ -623,6 +643,19 @@ mod tests {
 
     fn kinds(found: &[Finding]) -> Vec<&str> {
         found.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    #[test]
+    fn reveal_title_must_not_carry_hidden_names() {
+        let sky = Entry { id: 7, kind: "concept".into(), name: "三十三重天元天轨".into(), aliases: "天元天轨".into(), visibility: "第4卷起".into(), ..Default::default() };
+        let mut d = book(vec![ch(1, "陈渊抬头看天。")], vec![sky], vec![]);
+        let secret = |title: &str| Reveal { id: 1, book_id: 1, title: title.into(), status: "active".into(), ..Default::default() };
+        d.reveals = vec![secret("天元天轨与天地浊灵气的来历")];
+        let found: Vec<Finding> = check(&d).into_iter().filter(|f| f.kind == "秘密标题带出设定").collect();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].message.contains("标题里有「天元天轨」（设定「三十三重天元天轨」第4卷起）") && found[0].reveal_id == Some(1), "{found:?}");
+        d.reveals = vec![secret("天轨与浊灵气的来历")];
+        assert!(check(&d).iter().all(|f| f.kind != "秘密标题带出设定"), "公开的说法不算");
     }
 
     #[test]
