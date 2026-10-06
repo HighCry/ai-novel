@@ -1,6 +1,6 @@
 //! 长篇记忆：把设定库、分层摘要、伏笔、相关前文片段组装成有字数预算的上下文。
 //! 写某一章时先按可见性剔除这一章还不该看见的资料（见 visibility.rs），再按预算装配；
-//! 有揭示计划时再附上读者已知的秘密、本章投放清单和禁区（见 docs/叙事逻辑架构方案.md 5.2）。
+//! 有揭示计划时再附上读者已知的秘密、人物知情、本章投放清单和禁区（见 docs/叙事逻辑架构方案.md 5.2）。
 
 use crate::models::*;
 use crate::text::*;
@@ -19,6 +19,8 @@ pub struct BookData {
     pub reveals: Vec<Reveal>,
     pub reveal_events: Vec<RevealEvent>,
     pub progressions: Vec<Progression>,
+    /// 角色知识：谁从第几章起知道（或误会）哪个秘密
+    pub knowledge: Vec<Knowledge>,
     /// 时间线上的事件和时限
     pub events: Vec<Event>,
     numbers: HashMap<i64, Option<i64>>,
@@ -39,6 +41,7 @@ impl BookData {
             reveals: Vec::new(),
             reveal_events: Vec::new(),
             progressions: Vec::new(),
+            knowledge: Vec::new(),
             events: Vec::new(),
             numbers,
         }
@@ -48,21 +51,34 @@ impl BookData {
         self.entries.iter().find(|e| e.id == id).map(|e| e.name.as_str())
     }
 
+    /// 写第 cur 章时这段关系是不是已经结束：在本章之前结束的才算，本章里结束的写本章时还没结束；
+    /// 不知道是哪一章结束的照旧按已结束算。
+    fn ended_before(&self, r: &Relation, cur: Option<usize>) -> bool {
+        r.status == "ended"
+            && match (r.until_chapter_id.and_then(|id| self.position(id)), cur) {
+                (Some(end), Some(cur)) => end < cur,
+                _ => true,
+            }
+    }
+
     /// 和给定条目有关的关系，一行一条；已结束的关系标注出来，避免写成还很亲密。
-    /// 写某一章时只给这一章及之前建立的关系。
+    /// 写某一章时只给这一章及之前建立的关系，后面才结束的照常给。
     pub fn relation_lines(&self, ids: &HashSet<i64>, current: Option<&Chapter>) -> Vec<String> {
         let cur = current.and_then(|c| self.position(c.id));
         self.relations
             .iter()
             .filter(|r| ids.contains(&r.a_id) || ids.contains(&r.b_id))
             .filter(|r| self.not_after(r.since_chapter_id, cur))
-            .filter(|r| r.status != "ended" || (ids.contains(&r.a_id) && ids.contains(&r.b_id)))
             .filter_map(|r| {
+                let ended = self.ended_before(r, cur);
+                if ended && !(ids.contains(&r.a_id) && ids.contains(&r.b_id)) {
+                    return None;
+                }
                 let mut line = format!("· {} 与 {}：{}", self.entry_name(r.a_id)?, self.entry_name(r.b_id)?, r.kind.trim());
                 if !r.detail.trim().is_empty() {
                     line += &format!("（{}）", clip(&r.detail, 60));
                 }
-                if r.status == "ended" {
+                if ended {
                     line += "（这段关系已经结束）";
                 }
                 Some(line)
@@ -266,6 +282,74 @@ impl BookData {
     pub fn event_number(&self, e: &RevealEvent) -> Option<i64> {
         self.chapter(e.chapter_id).and_then(|c| self.number(c))
     }
+
+    /// 写 current 时读者能不能知道这个秘密的真相：之前已经揭开，或者按计划就在本章揭开。
+    pub fn open_to_reader(&self, r: &Reveal, current: &Chapter) -> bool {
+        self.revealed_before(r, Some(current)) || (r.reveal_at.is_some() && r.reveal_at == self.number(current))
+    }
+
+    /// 写 current 时某人对某个秘密知道多少：本章之前最新的一条（本章里才知道的，写本章时还不知道）；
+    /// 开篇前就知道的排在最前。没有当前章节时看全部。
+    pub fn knowledge_at(&self, entry_id: i64, reveal_id: i64, current: Option<&Chapter>) -> Option<&Knowledge> {
+        let cur = current.and_then(|c| self.position(c.id)).map(|p| p as i64);
+        self.knowledge
+            .iter()
+            .filter(|k| k.entry_id == entry_id && k.reveal_id == reveal_id)
+            .filter_map(|k| match k.chapter_id {
+                None => Some((-1, k)),
+                Some(id) => self.position(id).map(|p| (p as i64, k)),
+            })
+            .filter(|(p, _)| cur.map_or(true, |c| *p < c))
+            .max_by_key(|(p, k)| (*p, k.id))
+            .map(|(_, k)| k)
+    }
+
+    /// 写 current 时对这个秘密有记录的人和他最新的那条（含误会），按知道的先后排。
+    pub fn holders_at(&self, r: &Reveal, current: Option<&Chapter>) -> Vec<(&Entry, &Knowledge)> {
+        let mut out: Vec<(&Entry, &Knowledge)> = self.entries.iter().filter_map(|e| self.knowledge_at(e.id, r.id, current).map(|k| (e, k))).collect();
+        out.sort_by_key(|(_, k)| (k.chapter_id.and_then(|id| self.position(id)).map_or(-1, |p| p as i64), k.id));
+        out
+    }
+
+    /// 角色知识记在第几章、怎么知道的，写成「第3章，被告知」「本来就知道」。
+    pub fn knowledge_when(&self, k: &Knowledge) -> String {
+        let source = k.source.trim();
+        match k.chapter_id {
+            None if source.is_empty() || source == "本来就知道" => "本来就知道".to_string(),
+            None => format!("开篇前，{source}"),
+            Some(id) => {
+                let at = self.chapter(id).map(|c| self.label_short(c)).unwrap_or_default();
+                [at.as_str(), source].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("，")
+            }
+        }
+    }
+
+    /// 只要章号的标签：「第3章」；没有章号时用标题。
+    fn label_short(&self, ch: &Chapter) -> String {
+        self.number(ch).map_or_else(|| ch.title.trim().to_string(), |n| format!("第{n}章"))
+    }
+
+    /// 这一章的视角人物：章纲或节拍里写了「视角：某某」「某某视角」就用那个人，否则用主角。
+    pub fn pov(&self, cur: &Chapter) -> Vec<&Entry> {
+        let people: Vec<&Entry> = self.entries_at(Some(cur)).into_iter().filter(|e| e.kind == "character").collect();
+        let marked = people
+            .iter()
+            .filter_map(|e| {
+                let text = format!("{}\n{}", cur.outline, cur.beats);
+                e.keywords()
+                    .iter()
+                    .flat_map(|k| [format!("{k}视角"), format!("视角：{k}"), format!("视角:{k}"), format!("视角】{k}"), format!("视角人物：{k}")])
+                    .filter_map(|p| text.find(&p))
+                    .min()
+                    .map(|at| (at, *e))
+            })
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, e)| e);
+        match marked {
+            Some(e) => vec![e],
+            None => people.into_iter().filter(|e| e.role.trim() == "主角").collect(),
+        }
+    }
 }
 
 /// 计划里的三步，写成「第3章埋种子、第8章给线索、第40章揭开」。
@@ -337,6 +421,117 @@ fn forbidden(data: &BookData, cur: &Chapter) -> Vec<String> {
         .map(|r| {
             let terms = r.term_list();
             if terms.is_empty() { format!("· 「{}」：不点破", r.title.trim()) } else { format!("· 「{}」：不写「{}」", r.title.trim(), terms.join("」「")) }
+        })
+        .collect()
+}
+
+/// 某人对某个秘密的一项：知道的附上他知道的内容，误会的附上他信的说法；读者还不知道真相时只给标题。
+fn knowledge_item(data: &BookData, r: &Reveal, k: &Knowledge, cur: &Chapter) -> String {
+    let (title, when, note) = (r.title.trim(), data.knowledge_when(k), k.note.trim());
+    if k.misread {
+        let belief = if note.is_empty() { String::new() } else { format!("，以为{}", clip(note.trim_start_matches("以为"), 60)) };
+        format!("误会「{title}」（{when}）{belief}")
+    } else if data.open_to_reader(r, cur) && !note.is_empty() {
+        format!("知道「{title}」（{when}）：{}", clip(note, 60))
+    } else {
+        format!("知道「{title}」（{when}）")
+    }
+}
+
+/// 人物知情：视角人物知道、误会、不知道什么；本章出场的其他人物知道什么、还不知道视角人物知道的哪些事。
+/// 「不知道」只列读者已经知道、或者在场的人知道的，其余的禁区已经管住。读者还不知道的「惊奇」类，
+/// 除了视角人物自己知道的，都不在这里提，免得模型把知情的人写得可疑。没有角色知识的书什么都不加。
+pub fn people_knowledge(data: &BookData, cur: &Chapter, present: &[&Entry]) -> Vec<String> {
+    if data.knowledge.is_empty() {
+        return Vec::new();
+    }
+    let pov = data.pov(cur);
+    let reveals: Vec<&Reveal> = data.active_reveals().collect();
+    let state = |e: &Entry, r: &Reveal| data.knowledge_at(e.id, r.id, Some(cur));
+    let knows = |e: &Entry, r: &Reveal| state(e, r).is_some_and(|k| !k.misread);
+    let hidden_surprise = |r: &Reveal| r.is_surprise() && !data.open_to_reader(r, cur);
+    let others: Vec<&Entry> = present.iter().copied().filter(|e| e.kind == "character" && !pov.iter().any(|p| p.id == e.id)).collect();
+    let now = data.number(cur);
+    let mut out = Vec::new();
+    for p in &pov {
+        let mut lines: Vec<String> = reveals
+            .iter()
+            .filter_map(|r| {
+                let k = state(p, r)?;
+                let tail = if k.misread {
+                    "——揭开前照他的误会写"
+                } else if data.open_to_reader(r, cur) {
+                    ""
+                } else if r.is_surprise() {
+                    "——读者还不知道，不能引人注意"
+                } else {
+                    "——读者还不知道：可以写他据此行动，不要替他想出来、说出来"
+                };
+                Some(format!("· {}{tail}", knowledge_item(data, r, k, cur)))
+            })
+            .collect();
+        let unknown: Vec<String> = reveals
+            .iter()
+            .filter(|r| state(p, r).is_none() && (r.reveal_at.is_none() || r.reveal_at != now))
+            .filter(|r| data.revealed_before(r, Some(cur)) || (!hidden_surprise(r) && others.iter().any(|o| knows(o, r))))
+            .map(|r| format!("「{}」", r.title.trim()))
+            .collect();
+        if !unknown.is_empty() {
+            lines.push(format!("· 不知道：{}——他说不出、想不到、用不上这些，旁白也不替他点破", unknown.join("")));
+        }
+        if !lines.is_empty() {
+            out.push(format!("视角人物「{}」：", p.name.trim()));
+            out.extend(lines);
+        }
+    }
+    let mut rest = Vec::new();
+    for o in others {
+        let mut parts: Vec<String> = reveals.iter().filter(|r| !hidden_surprise(r)).filter_map(|r| state(o, r).map(|k| knowledge_item(data, r, k, cur))).collect();
+        let blind: Vec<String> = reveals
+            .iter()
+            .filter(|r| state(o, r).is_none() && pov.iter().any(|p| knows(p, r)))
+            .map(|r| format!("「{}」", r.title.trim()))
+            .collect();
+        if !blind.is_empty() {
+            parts.push(format!("不知道{}", blind.join("")));
+        }
+        if !parts.is_empty() {
+            rest.push(format!("· {}：{}", o.name.trim(), parts.join("；")));
+        }
+    }
+    if !rest.is_empty() {
+        out.push(if pov.is_empty() { "本章出场的人物：".to_string() } else { "本章出场的其他人物：".to_string() });
+        out.extend(rest);
+    }
+    out
+}
+
+/// 逻辑审校用的秘密台账（作者层）：每条秘密的真相、泄露词、读者知道到哪一步、写本章之前谁知道或误会了。
+pub fn secret_ledger(data: &BookData, cur: &Chapter) -> Vec<String> {
+    let now = data.number(cur);
+    data.active_reveals()
+        .map(|r| {
+            let reader = match data.reveal_events_before(r, Some(cur)).into_iter().find(|e| e.step == "reveal") {
+                Some(e) => data.event_number(e).map_or_else(|| "读者已经知道".to_string(), |n| format!("读者第{n}章已经知道")),
+                None if r.reveal_at.is_some() && r.reveal_at == now => "本章按计划揭开".to_string(),
+                None => r.reveal_at.map_or_else(|| "读者还不知道".to_string(), |n| format!("读者还不知道，计划第{n}章揭开")),
+            };
+            let gap = if r.gap.trim().is_empty() { String::new() } else { format!("{}；", r.gap.trim()) };
+            let mut line = format!("· 「{}」（{gap}{reader}）", r.title.trim());
+            if !r.truth.trim().is_empty() {
+                line += &format!("真相：{}", clip(&r.truth, 120));
+            }
+            let terms = r.term_list();
+            if !terms.is_empty() {
+                line += &format!("；泄露词：{}", terms.join("、"));
+            }
+            let who: Vec<String> = data
+                .holders_at(r, Some(cur))
+                .into_iter()
+                .map(|(e, k)| format!("{}{}（{}）", e.name.trim(), if k.misread { "误会" } else { "" }, data.knowledge_when(k)))
+                .collect();
+            line += &format!("；写本章之前知情：{}", if who.is_empty() { "没有记录".to_string() } else { who.join("、") });
+            line
         })
         .collect()
 }
@@ -688,9 +883,15 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
         }
     }
 
-    // 揭示计划：写某一章时给投放清单和禁区，规划时给整份计划；没有计划的书什么都不加
+    // 揭示计划：写某一章时给人物知情、投放清单和禁区，规划时给整份计划；没有计划的书什么都不加
     match o.current {
         Some(cur) => {
+            let present: Vec<&Entry> = matched.iter().copied().filter(|e| e.kind == "character").collect();
+            let people = people_knowledge(data, cur, &present);
+            if !people.is_empty() {
+                let body = format!("人物只能凭自己知道的说话、行动；旁白贴着视角人物，不替他说出他不知道的名字和来历。\n{}", take_within(people, b * 5 / 100));
+                out.push(Section { title: "人物知情（截至上一章）".into(), body });
+            }
             if o.include_world {
                 let list = delivery(data, cur);
                 if !list.is_empty() {
@@ -894,6 +1095,116 @@ mod tests {
     }
 
     #[test]
+    fn relation_ended_later_is_still_active_when_revising() {
+        let mut data = sample();
+        data.relations = vec![
+            Relation { id: 1, a_id: 1, b_id: 2, kind: "盟友".into(), status: "ended".into(), until_chapter_id: Some(3), ..Default::default() },
+            Relation { id: 2, a_id: 1, b_id: 3, kind: "师徒".into(), status: "ended".into(), ..Default::default() },
+        ];
+        let both: HashSet<i64> = [1, 2].into_iter().collect();
+        let only_lin: HashSet<i64> = [1].into_iter().collect();
+        assert_eq!(data.relation_lines(&both, data.chapter(2)), vec!["· 林凡 与 苏雨：盟友".to_string()], "第3章才结束，写第2章时还是盟友");
+        assert_eq!(data.relation_lines(&only_lin, data.chapter(3)), vec!["· 林凡 与 苏雨：盟友".to_string()], "本章里结束的，写本章时还没结束");
+        assert_eq!(data.relation_lines(&both, data.chapter(4)), vec!["· 林凡 与 苏雨：盟友（这段关系已经结束）".to_string()]);
+        assert!(data.relation_lines(&only_lin, data.chapter(4)).is_empty(), "已结束的关系只在双方都在场时提");
+        let all: HashSet<i64> = [1, 3].into_iter().collect();
+        assert!(data.relation_lines(&all, data.chapter(2)).iter().any(|l| l.contains("师徒（这段关系已经结束）")), "不知道哪一章结束的照旧按已结束算");
+    }
+
+    /// 林凡是主角；「林凡的底牌」第1章就向读者揭开，「玉佩的来历」是好奇类，「苏雨的身份」是惊奇类。
+    fn knowing() -> BookData {
+        let mut data = sample();
+        data.entries[0].role = "主角".into();
+        data.entries.push(Entry { id: 4, name: "赵四".into(), kind: "character".into(), ..Default::default() });
+        data.reveals = vec![
+            Reveal { gap: "好奇".into(), reveal_at: Some(40), ..reveal(1, "玉佩的来历", "玉佩是上古仙帝的残魂所化", "仙帝残魂") },
+            Reveal { gap: "惊奇".into(), reveal_at: Some(30), ..reveal(2, "苏雨的身份", "苏雨是魔教圣女", "魔教圣女") },
+            Reveal { gap: "好奇".into(), reveal_at: Some(1), ..reveal(3, "林凡的底牌", "林凡能看见别人的寿命", "看见寿命") },
+        ];
+        data.reveal_events = vec![RevealEvent { id: 1, reveal_id: 3, chapter_id: 1, step: "reveal".into(), ..Default::default() }];
+        let k = |id, reveal_id, entry_id, chapter_id: Option<i64>, source: &str, misread, note: &str| Knowledge {
+            id,
+            reveal_id,
+            entry_id,
+            chapter_id,
+            source: source.into(),
+            misread,
+            note: note.into(),
+            ..Default::default()
+        };
+        data.knowledge = vec![
+            k(1, 3, 1, None, "本来就知道", false, "能看见别人头顶的寿数"),
+            k(2, 2, 2, None, "本来就知道", false, "自己是魔教圣女"),
+            k(3, 2, 1, Some(2), "被告知", true, "以为她只是医女"),
+            k(4, 3, 2, Some(3), "亲历", false, "看见他盯着别人的眉心发呆"),
+            k(5, 1, 4, Some(1), "推断", false, "玉佩不是凡物"),
+        ];
+        data
+    }
+
+    #[test]
+    fn pov_is_marked_character_or_protagonist() {
+        let data = knowing();
+        let names = |ch: &Chapter| data.pov(ch).into_iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        let ch = data.chapter(2).cloned().unwrap();
+        assert_eq!(names(&ch), vec!["林凡"]);
+        assert_eq!(names(&Chapter { outline: "苏雨视角：她在药铺等林凡".into(), ..ch.clone() }), vec!["苏雨"]);
+        assert_eq!(names(&Chapter { beats: "1. 【视角】赵四 守在城门".into(), ..ch.clone() }), vec!["赵四"]);
+        assert_eq!(names(&Chapter { outline: "林凡的视角里，苏雨很陌生".into(), ..ch }), vec!["林凡"], "没写成标记时用主角");
+    }
+
+    #[test]
+    fn people_knowledge_follows_chapters_without_leaking() {
+        let data = knowing();
+        let section = |id: i64, outline: &str| {
+            let cur = Chapter { outline: outline.into(), ..data.chapter(id).cloned().unwrap() };
+            let sections = compose(&data, &ComposeOpts { current: Some(&cur), focus_text: "", instruction: "", budget: 12000, include_world: true, include_outline: true });
+            sections.iter().find(|s| s.title == "人物知情（截至上一章）").map(|s| s.body.clone()).unwrap_or_default()
+        };
+
+        let ch2 = section(2, "林凡带着苏雨去见赵四");
+        let want2 = [
+            "视角人物「林凡」：",
+            "· 知道「林凡的底牌」（本来就知道）：能看见别人头顶的寿数",
+            "· 不知道：「玉佩的来历」——他说不出、想不到、用不上这些，旁白也不替他点破",
+            "本章出场的其他人物：",
+            "· 苏雨：不知道「林凡的底牌」",
+            "· 赵四：知道「玉佩的来历」（第1章，推断）；不知道「林凡的底牌」",
+        ];
+        for want in want2 {
+            assert!(ch2.contains(want), "缺少「{want}」：\n{ch2}");
+        }
+        for leak in ["上古仙帝", "魔教圣女", "玉佩不是凡物", "苏雨的身份", "以为她只是医女"] {
+            assert!(!ch2.contains(leak), "第2章不该出现「{leak}」：\n{ch2}");
+        }
+
+        let ch4 = section(4, "林凡和苏雨夜谈");
+        assert!(ch4.contains("· 误会「苏雨的身份」（第2章，被告知），以为她只是医女——揭开前照他的误会写"), "{ch4}");
+        assert!(ch4.contains("· 苏雨：知道「林凡的底牌」（第3章，亲历）：看见他盯着别人的眉心发呆"), "读者已经知道的附上内容：{ch4}");
+        assert!(!ch4.contains("魔教圣女") && !ch4.contains("自己是"), "惊奇类揭开前不提苏雨自己知情：{ch4}");
+
+        let su = section(4, "苏雨视角：她在药铺等林凡");
+        assert!(su.contains("视角人物「苏雨」：") && su.contains("· 知道「苏雨的身份」（本来就知道）——读者还不知道，不能引人注意"), "{su}");
+        assert!(!su.contains("自己是魔教圣女"), "读者还不知道的只给标题：{su}");
+
+        let mut bare = data;
+        bare.knowledge.clear();
+        let cur = bare.chapter(2).cloned().unwrap();
+        assert!(people_knowledge(&bare, &cur, &[]).is_empty(), "没有角色知识的书不加人物知情");
+    }
+
+    #[test]
+    fn secret_ledger_shows_reader_progress_and_holders() {
+        let data = knowing();
+        let lines = secret_ledger(&data, data.chapter(2).unwrap());
+        assert_eq!(lines[0], "· 「玉佩的来历」（好奇；读者还不知道，计划第40章揭开）真相：玉佩是上古仙帝的残魂所化；泄露词：仙帝残魂；写本章之前知情：赵四（第1章，推断）");
+        assert!(lines[1].contains("（惊奇；读者还不知道，计划第30章揭开）") && lines[1].ends_with("写本章之前知情：苏雨（本来就知道）"), "林凡第2章才误会，写第2章时还没有：{}", lines[1]);
+        assert!(lines[2].contains("（好奇；读者第1章已经知道）") && lines[2].ends_with("写本章之前知情：林凡（本来就知道）"), "{}", lines[2]);
+        let later = secret_ledger(&data, data.chapter(4).unwrap());
+        assert!(later[1].ends_with("写本章之前知情：苏雨（本来就知道）、林凡误会（第2章，被告知）"), "{}", later[1]);
+    }
+
+    #[test]
     fn state_without_snapshots_not_leaked_when_revising() {
         let data = sample();
         let lin = data.entries[0].clone();
@@ -949,7 +1260,7 @@ mod tests {
         assert!(text.contains("黑色玉佩的来历"));
         assert!(text.contains("【相关前文片段】"));
         assert!(text.contains("上一章结尾（第3章 拍卖会）"));
-        assert!(!text.contains("【禁区】") && !text.contains("【本章投放清单】") && !text.contains("读者已知"), "没有揭示计划的书不加这些段落");
+        assert!(!text.contains("【禁区】") && !text.contains("【本章投放清单】") && !text.contains("读者已知") && !text.contains("人物知情"), "没有揭示计划的书不加这些段落");
         let recap = sections.iter().find(|s| s.title == "前情提要").unwrap();
         let first = recap.body.find("第1章").unwrap();
         let third = recap.body.find("第3章").unwrap();

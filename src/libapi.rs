@@ -186,6 +186,7 @@ pub async fn analyze_item(State(st): State<AppState>, Path(id): Path<i64>) -> Ap
         role: Role::Analyst,
         messages: vec![Message::system(render_id("system.analyst", &Vars::new(), &ov)), Message::user(render_id("task.library_analyze", &v, &ov) + JSON_RULE)],
         json: true,
+        temperature: None,
     };
     let req = AiRequest { task: "library_analyze".into(), ..Default::default() };
     let value = complete_json(&st, &settings, prep, &req).await?;
@@ -397,6 +398,7 @@ pub async fn distill_guide(State(st): State<AppState>, Json(r): Json<GuideSave>)
         role: Role::Analyst,
         messages: vec![Message::system(render_id("system.analyst", &Vars::new(), &ov)), Message::user(render_id("task.style_distill", &v, &ov))],
         json: false,
+        temperature: None,
     };
     let req = AiRequest { task: "style_distill".into(), ..Default::default() };
     let text = complete_text(&st, &settings, prep, &req).await?;

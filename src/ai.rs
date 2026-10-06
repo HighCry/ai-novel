@@ -1,10 +1,10 @@
 //! AI 任务：根据任务类型组装上下文和提示词，流式（SSE）或一次性（JSON）返回结果。
 
-use crate::api::{bad_request, load_book_data, mark_early_terms, not_found, upstream, ApiResult, AppError};
+use crate::api::{bad_request, content_hash, load_book_data, mark_early_terms, not_found, upstream, ApiResult, AppError};
 use crate::db::AiLog;
 use crate::library;
 use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmClient, LlmEvent, Message, Usage, CANCELLED};
-use crate::memory::{compose, match_entries, plan_text, render, render_entry, BookData, ComposeOpts};
+use crate::memory::{compose, match_entries, plan_text, render, render_entry, secret_ledger, BookData, ComposeOpts};
 use crate::models::{Book, Chapter, Entry, Provider, Role, Settings};
 use crate::prompts::{self, golden_hint, instruction_block, render_id, titled, titled_block, Brief};
 use crate::skills::{self, Skill};
@@ -60,6 +60,8 @@ pub struct Prepared {
     pub role: Role,
     pub messages: Vec<Message>,
     pub json: bool,
+    /// 不用这个角色设置里的温度时填上
+    pub temperature: Option<f32>,
 }
 
 /// 技能修订要用的：技能、要修订的正文、本地检测结果、必须原样保留的设定词
@@ -246,7 +248,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
         if json {
             user.push_str(JSON_RULE);
         }
-        Prepared { role, messages: vec![Message::system(system), Message::user(user)], json }
+        Prepared { role, messages: vec![Message::system(system), Message::user(user)], json, temperature: None }
     };
     match task {
         "memes" | "preference" => {
@@ -453,7 +455,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             let skip = history.len().saturating_sub(24);
             let mut messages = vec![Message::system(render_id("system.chat", &v, ov))];
             messages.extend(history.into_iter().skip(skip));
-            Ok(Prepared { role: Role::Writer, messages, json: false })
+            Ok(Prepared { role: Role::Writer, messages, json: false, temperature: None })
         }
         "world" | "outline" | "synopsis" | "volume_outline" | "ideas" | "characters" => {
             let b = brief_from(req, data);
@@ -591,6 +593,25 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             v.insert("instruction_block", instruction_block(&req.instruction, "作者的要求"));
             Ok(prepared(Role::Writer, editor_system(&d.book.genre, ov), "task.simulate", &v, false))
         }
+        "logic_check" => {
+            let d = need(data)?;
+            let c = req.chapter_id.and_then(|id| d.chapter(id)).ok_or_else(|| not_found("章节"))?;
+            if c.content.trim().is_empty() {
+                return Err(bad_request("这一章还没有正文"));
+            }
+            let opts = ComposeOpts { current: Some(c), focus_text: &c.content, instruction: "", budget: s.context_budget, include_world: true, include_outline: false };
+            let pov = d.pov(c).into_iter().map(|e| e.name.trim().to_string()).collect::<Vec<_>>().join("、");
+            let mut v = Vars::new();
+            v.insert("context", render(&compose(d, &opts)));
+            v.insert("secrets_block", titled_block("秘密台账（作者层，只给审校用：真相、读者知道到哪一步、写本章之前谁知情）", &secret_ledger(d, c).join("\n"), 6000));
+            v.insert("pov", if pov.is_empty() { "没有标出，按正文判断".into() } else { pov });
+            v.insert("chapter", d.label(c));
+            v.insert("content", clip(&c.content, 20000));
+            // 审校用写作模型（设置里通常是最强的那个），温度按分析模型压低
+            let mut p = prepared(Role::Writer, render_id("system.analyst", &Vars::new(), ov), "task.logic_check", &v, true);
+            p.temperature = Some(s.analyst.temperature.min(0.3));
+            Ok(p)
+        }
         "summarize" | "extract" | "check" | "review" | "tension" | "first_read" | "revision_plan" => {
             let d = need(data)?;
             let c = req.chapter_id.and_then(|id| d.chapter(id)).ok_or_else(|| not_found("章节"))?;
@@ -624,9 +645,9 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                         .collect::<Vec<_>>()
                         .join("\n");
                     let threads = d.open_threads(Some(c)).into_iter().map(|t| format!("{}. {}", t.id, t.title)).collect::<Vec<_>>().join("\n");
+                    // 读者已经知道的秘密也列上：人物知道得比读者晚，角色知识要按人记
                     let reveals = d
                         .active_reveals()
-                        .filter(|r| !d.revealed_before(r, Some(c)))
                         .map(|r| {
                             let mut line = format!("{}. {}", r.id, r.title.trim());
                             if !r.truth.trim().is_empty() {
@@ -639,6 +660,12 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                             let plan = plan_text(r);
                             if !plan.is_empty() {
                                 line += &format!("｜{plan}");
+                            }
+                            line += if d.revealed_before(r, Some(c)) { "｜读者已经知道" } else { "｜读者还不知道" };
+                            let who: Vec<String> =
+                                d.holders_at(r, Some(c)).into_iter().map(|(e, k)| format!("{}{}", e.name.trim(), if k.misread { "（误会）" } else { "" })).collect();
+                            if !who.is_empty() {
+                                line += &format!("｜已经知情：{}", who.join("、"));
                             }
                             line
                         })
@@ -700,6 +727,18 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             Ok(prepared(Role::Analyst, render_id("system.analyst", &Vars::new(), ov), "task.style_profile", &v, false))
         }
         _ => Err(bad_request(format!("未知的任务类型：{task}"))),
+    }
+}
+
+/// 审校结果里每条问题标上 found：引用的原文在正文里找不找得到（模型偶尔会改字或编造）。
+fn mark_quotes(content: &str, value: &mut Value) {
+    let Some(items) = value.get_mut("issues").and_then(Value::as_array_mut) else { return };
+    for it in items {
+        let quote = it["quote"].as_str().unwrap_or("").trim().trim_end_matches(|c| c == '…' || c == '.').trim().to_string();
+        let found = !quote.is_empty() && content.contains(&quote);
+        if let Some(o) = it.as_object_mut() {
+            o.insert("found".into(), json!(found));
+        }
     }
 }
 
@@ -1137,7 +1176,7 @@ fn chat_request(settings: &Settings, prep: Prepared) -> Result<(ChatRequest, cra
     let chat = ChatRequest {
         model: cfg.model,
         messages: prep.messages,
-        temperature: cfg.temperature,
+        temperature: prep.temperature.unwrap_or(cfg.temperature),
         max_tokens: cfg.max_tokens,
         json_mode: prep.json && settings.json_mode,
         stream_usage: false,
@@ -1198,6 +1237,14 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
                 mark_early_terms(&load_book_data(&st.db, bid)?, &mut value);
             }
         }
+        if req.task == "logic_check" {
+            if let Some(c) = req.chapter_id.map(|id| st.db.get_chapter(id)).transpose()?.flatten() {
+                mark_quotes(&c.content, &mut value);
+                let stored = json!({ "at": crate::db::now(), "hash": content_hash(&c.content), "issues": value["issues"].as_array().cloned().unwrap_or_default() });
+                st.db.set_chapter_logic(c.id, &stored)?;
+                value["at"] = stored["at"].clone();
+            }
+        }
         return Ok(Json(value));
     }
     let text = complete_text(&st, &settings, prep, &req).await?;
@@ -1221,7 +1268,15 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_plain, revise_chunks, Joiner};
+    use super::{clean_plain, mark_quotes, revise_chunks, Joiner};
+
+    #[test]
+    fn marks_quotes_missing_from_text() {
+        let mut v = serde_json::json!({ "issues": [{ "quote": "陈渊冷笑一声……" }, { "quote": "陈渊冷笑了一声" }, { "quote": "" }, { "problem": "没有原文" }] });
+        mark_quotes("陈渊冷笑一声，转身就走。", &mut v);
+        let found: Vec<bool> = v["issues"].as_array().unwrap().iter().map(|i| i["found"].as_bool().unwrap()).collect();
+        assert_eq!(found, vec![true, false, false, false], "去掉末尾省略号再找；改过字的、空的都算没找到");
+    }
 
     #[test]
     fn strips_titles_and_markdown() {

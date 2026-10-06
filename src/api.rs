@@ -79,6 +79,7 @@ pub fn load_book_data(db: &Db, book_id: i64) -> Result<BookData, AppError> {
     data.reveals = db.list_reveals(book_id)?;
     data.reveal_events = db.list_book_reveal_events(book_id)?;
     data.progressions = db.list_book_progressions(book_id)?;
+    data.knowledge = db.list_book_knowledge(book_id)?;
     data.events = db.list_events(book_id)?;
     Ok(data)
 }
@@ -608,12 +609,14 @@ fn normalize_gap(gap: &str) -> String {
     ["惊奇", "悬念", "好奇"].into_iter().find(|g| gap.contains(g)).map_or_else(|| gap.trim().to_string(), str::to_string)
 }
 
-/// 秘密列表，附每条的揭示进度（带章号）和写到第几章，给信息节奏面板画时间条。
+/// 秘密列表，附每条的揭示进度（带章号）、角色知识和写到第几章，给信息节奏面板画时间条和知情表；
+/// cast 是知情表的列：主角、重要配角、反派，加上有角色知识记录的人物，主角排前面。
 pub async fn list_reveals(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Value> {
     require_book(&st.db, book_id)?;
     let data = load_book_data(&st.db, book_id)?;
     let written = data.chapters.iter().filter(|c| !c.content.trim().is_empty()).filter_map(|c| data.number(c)).max().unwrap_or(0);
     let chapters = data.chapters.iter().filter_map(|c| data.number(c)).max().unwrap_or(0);
+    let order = |k: &Knowledge| (k.chapter_id.and_then(|id| data.position(id)).map_or(-1, |p| p as i64), k.id);
     let reveals: Vec<Value> = data
         .reveals
         .iter()
@@ -624,10 +627,83 @@ pub async fn list_reveals(State(st): State<AppState>, Path(book_id): Path<i64>) 
                 .into_iter()
                 .map(|e| json!({ "id": e.id, "chapter_id": e.chapter_id, "number": data.event_number(e), "step": e.step, "quote": e.quote, "note": e.note }))
                 .collect::<Vec<_>>());
+            let mut knows: Vec<&Knowledge> = data.knowledge.iter().filter(|k| k.reveal_id == r.id).collect();
+            knows.sort_by_key(|k| order(k));
+            v["knows"] = json!(knows
+                .into_iter()
+                .map(|k| {
+                    let number = k.chapter_id.and_then(|id| data.chapter(id)).and_then(|c| data.number(c));
+                    json!({ "id": k.id, "entry_id": k.entry_id, "name": data.entry_name(k.entry_id), "chapter_id": k.chapter_id, "number": number,
+                            "source": k.source, "misread": k.misread, "note": k.note, "quote": k.quote, "when": data.knowledge_when(k) })
+                })
+                .collect::<Vec<_>>());
             v
         })
         .collect();
-    Ok(Json(json!({ "reveals": reveals, "written": written, "chapters": chapters })))
+    let mut cast: Vec<&Entry> =
+        data.entries.iter().filter(|e| e.kind == "character" && (e.is_major() || data.knowledge.iter().any(|k| k.entry_id == e.id))).collect();
+    cast.sort_by_key(|e| e.role.trim() != "主角");
+    let cast: Vec<Value> = cast.into_iter().map(|e| json!({ "id": e.id, "name": e.name, "role": e.role })).collect();
+    Ok(Json(json!({ "reveals": reveals, "written": written, "chapters": chapters, "cast": cast })))
+}
+
+// ---------- 角色知识 ----------
+
+/// 秘密、人物、章节都要是这本书的；来源统一写法。
+fn check_knowledge(db: &Db, book_id: i64, k: &mut Knowledge) -> Result<(), AppError> {
+    db.get_reveal(k.reveal_id)?.filter(|r| r.book_id == book_id).ok_or_else(|| not_found("秘密"))?;
+    db.get_entry(k.entry_id)?.filter(|e| e.book_id == book_id).ok_or_else(|| not_found("人物"))?;
+    if let Some(cid) = k.chapter_id {
+        db.get_chapter(cid)?.filter(|c| c.book_id == book_id).ok_or_else(|| not_found("章节"))?;
+    }
+    k.source = normalize_source(&k.source);
+    Ok(())
+}
+
+pub async fn create_knowledge(State(st): State<AppState>, Path(book_id): Path<i64>, Json(mut k): Json<Knowledge>) -> ApiResult<Knowledge> {
+    require_book(&st.db, book_id)?;
+    k.id = 0;
+    check_knowledge(&st.db, book_id, &mut k)?;
+    Ok(Json(st.db.save_knowledge(&k)?))
+}
+
+pub async fn patch_knowledge(State(st): State<AppState>, Path(id): Path<i64>, Json(v): Json<Value>) -> ApiResult<Knowledge> {
+    let k = st.db.get_knowledge(id)?.ok_or_else(|| not_found("角色知识"))?;
+    let book_id = st.db.get_reveal(k.reveal_id)?.map(|r| r.book_id).ok_or_else(|| not_found("秘密"))?;
+    let mut updated: Knowledge = apply_patch(&k, &v, &["id", "created_at"])?;
+    check_knowledge(&st.db, book_id, &mut updated)?;
+    Ok(Json(st.db.save_knowledge(&updated)?))
+}
+
+pub async fn delete_knowledge(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    st.db.delete_knowledge(id)?;
+    ok()
+}
+
+/// 正文的指纹，用来判断逻辑审校之后正文改没改过（FNV-1a）
+pub(crate) fn content_hash(text: &str) -> String {
+    let h = text.trim().bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{h:016x}")
+}
+
+/// 这一章上次模型逻辑审校的结果；正文之后改过时 stale 为 true。没审过时返回 null。
+pub async fn chapter_logic(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    let ch = st.db.get_chapter(id)?.ok_or_else(|| not_found("章节"))?;
+    let mut v = st.db.chapter_logic(id)?;
+    if v.is_object() {
+        v["stale"] = json!(v["hash"].as_str() != Some(content_hash(&ch.content).as_str()));
+    }
+    Ok(Json(v))
+}
+
+/// 模型给的是非：true、"true"、"是"、"误会" 都算是。
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_i64().is_some_and(|n| n != 0),
+        Value::String(s) => matches!(s.trim(), "true" | "是" | "误会" | "yes" | "1"),
+        _ => false,
+    }
 }
 
 fn check_reveal(r: &mut Reveal) -> Result<(), AppError> {
@@ -732,7 +808,8 @@ pub struct PlanApply {
     pub secrets: Vec<Value>,
 }
 
-/// 采纳 reveal_plan 生成、作者审过的揭示计划：同标题的秘密更新，其余新建；已写章节里做过的步骤记成揭示进度。
+/// 采纳 reveal_plan 生成、作者审过的揭示计划：同标题的秘密更新，其余新建；已写章节里做过的步骤记成揭示进度，
+/// knows 里开篇前就知道（chapter 为空或 0）和在已有章节里知道的人记成角色知识，对不上的人名和章号跳过。
 pub async fn apply_reveal_plan(State(st): State<AppState>, Path(book_id): Path<i64>, Json(p): Json<PlanApply>) -> ApiResult<Value> {
     require_book(&st.db, book_id)?;
     let data = load_book_data(&st.db, book_id)?;
@@ -743,7 +820,7 @@ pub async fn apply_reveal_plan(State(st): State<AppState>, Path(book_id): Path<i
     let entry_id = |name: &str| data.entries.iter().find(|e| e.keywords().iter().any(|k| k == name)).map(|e| e.id);
     let chapter_id = |n: i64| data.chapters.iter().find(|c| data.number(c) == Some(n)).map(|c| c.id);
     let text = |s: &Value, k: &str| s[k].as_str().unwrap_or("").trim().to_string();
-    let (mut created, mut updated, mut events) = (0, 0, 0);
+    let (mut created, mut updated, mut events, mut knows) = (0, 0, 0, 0);
     for (i, s) in p.secrets.iter().enumerate() {
         let title = text(s, "title");
         if title.is_empty() {
@@ -778,8 +855,21 @@ pub async fn apply_reveal_plan(State(st): State<AppState>, Path(book_id): Path<i
             st.db.add_reveal_event(&RevealEvent { reveal_id: saved.id, chapter_id: cid, step: step.into(), quote: text(d, "quote"), note: text(d, "note"), ..Default::default() })?;
             events += 1;
         }
+        for k in s["knows"].as_array().into_iter().flatten() {
+            let Some(eid) = entry_id(&text(k, "who")) else { continue };
+            let chapter = match value_chapter(&k["chapter"]) {
+                None => None,
+                Some(n) => match chapter_id(n) {
+                    Some(id) => Some(id),
+                    None => continue,
+                },
+            };
+            let source = text(k, "source");
+            st.db.save_knowledge(&Knowledge { reveal_id: saved.id, entry_id: eid, chapter_id: chapter, source, misread: truthy(&k["misread"]), note: text(k, "note"), ..Default::default() })?;
+            knows += 1;
+        }
     }
-    Ok(Json(json!({ "created": created, "updated": updated, "events": events })))
+    Ok(Json(json!({ "created": created, "updated": updated, "events": events, "knows": knows })))
 }
 
 pub async fn entry_states(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Vec<EntryState>> {
@@ -838,6 +928,8 @@ pub struct Updates {
     pub reveals: Vec<RevealStep>,
     /// 计划外的新秘密
     pub reveals_new: Vec<RevealNew>,
+    /// 本章里谁知道了（或误会了）哪个秘密
+    pub knowledge: Vec<KnowledgeIn>,
     /// 本章结束时的故事时间
     pub time: TimeUpdate,
     pub events: Vec<EventNew>,
@@ -877,6 +969,19 @@ pub struct RevealStep {
     pub step: String,
     pub quote: String,
     pub note: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct KnowledgeIn {
+    /// 人物名
+    pub who: String,
+    /// 秘密编号
+    pub id: i64,
+    pub source: String,
+    pub misread: Value,
+    pub note: String,
+    pub quote: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1040,9 +1145,32 @@ pub async fn apply_updates(State(st): State<AppState>, Path(book_id): Path<i64>,
         if !r.detail.trim().is_empty() {
             rel.detail = r.detail.trim().to_string();
         }
+        let ended_now = r.status == "ended" && rel.status != "ended";
         rel.status = if r.status == "ended" { "ended".into() } else { "active".into() };
+        if ended_now {
+            rel.until_chapter_id = u.chapter_id;
+        }
         st.db.save_relation(&rel)?;
         relations += 1;
+    }
+    // 角色知识：只认这本书的秘密和设定库里的人，记成本章知道的
+    let mut knowledge = 0;
+    if let Some(cid) = u.chapter_id {
+        let known = st.db.list_reveals(book_id)?;
+        for k in u.knowledge.iter().filter(|k| known.iter().any(|r| r.id == k.id)) {
+            let Some(eid) = find(&k.who) else { continue };
+            st.db.save_knowledge(&Knowledge {
+                reveal_id: k.id,
+                entry_id: eid,
+                chapter_id: Some(cid),
+                source: k.source.clone(),
+                misread: truthy(&k.misread),
+                note: k.note.clone(),
+                quote: k.quote.clone(),
+                ..Default::default()
+            })?;
+            knowledge += 1;
+        }
     }
     // 揭示进度：只认这本书的秘密；计划外的新秘密记成从本章埋下
     let (mut reveal_steps, mut reveals_added) = (0, 0);
@@ -1115,6 +1243,7 @@ pub async fn apply_updates(State(st): State<AppState>, Path(book_id): Path<i64>,
         "relations": relations,
         "reveal_steps": reveal_steps,
         "reveals_added": reveals_added,
+        "knowledge": knowledge,
     })))
 }
 

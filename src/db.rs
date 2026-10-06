@@ -302,7 +302,26 @@ CREATE TABLE IF NOT EXISTS refchapters (
 CREATE INDEX IF NOT EXISTS idx_refchapters ON refchapters(ref_id, seq);
 "#;
 
-const MIGRATIONS: [&str; 9] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10];
+/// 角色知识、关系在哪一章结束、章节的模型逻辑审校结果（叙事逻辑第三期）
+const SCHEMA_V11: &str = r#"
+CREATE TABLE IF NOT EXISTS knowledge (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reveal_id INTEGER NOT NULL REFERENCES reveals(id) ON DELETE CASCADE,
+  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  chapter_id INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
+  source TEXT NOT NULL DEFAULT '',
+  misread INTEGER NOT NULL DEFAULT 0,
+  note TEXT NOT NULL DEFAULT '',
+  quote TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_reveal ON knowledge(reveal_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_entry ON knowledge(entry_id);
+ALTER TABLE relations ADD COLUMN until_chapter_id INTEGER REFERENCES chapters(id) ON DELETE SET NULL;
+ALTER TABLE chapters ADD COLUMN logic TEXT NOT NULL DEFAULT '';
+"#;
+
+const MIGRATIONS: [&str; 10] = [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11];
 
 const LIB_COLS: &str = "id, title, source, genre, tags, note, content, analysis, enabled, book_id, word_count, created_at, updated_at";
 
@@ -370,7 +389,7 @@ pub struct Accepted {
     pub learned: bool,
 }
 
-const REL_COLS: &str = "id, book_id, a_id, b_id, kind, detail, status, since_chapter_id, updated_at";
+const REL_COLS: &str = "id, book_id, a_id, b_id, kind, detail, status, since_chapter_id, updated_at, until_chapter_id";
 
 fn relation_row(r: &Row) -> rusqlite::Result<Relation> {
     Ok(Relation {
@@ -383,6 +402,23 @@ fn relation_row(r: &Row) -> rusqlite::Result<Relation> {
         status: r.get(6)?,
         since_chapter_id: r.get(7)?,
         updated_at: r.get(8)?,
+        until_chapter_id: r.get(9)?,
+    })
+}
+
+const KNOW_COLS: &str = "k.id, k.reveal_id, k.entry_id, k.chapter_id, k.source, k.misread, k.note, k.quote, k.created_at";
+
+fn knowledge_row(r: &Row) -> rusqlite::Result<Knowledge> {
+    Ok(Knowledge {
+        id: r.get(0)?,
+        reveal_id: r.get(1)?,
+        entry_id: r.get(2)?,
+        chapter_id: r.get(3)?,
+        source: r.get(4)?,
+        misread: r.get(5)?,
+        note: r.get(6)?,
+        quote: r.get(7)?,
+        created_at: r.get(8)?,
     })
 }
 
@@ -1207,20 +1243,22 @@ impl Db {
         Ok(self.c().query_row(&sql, [id], relation_row).optional()?)
     }
 
+    /// 没结束的关系不留结束章节。
     pub fn save_relation(&self, r: &Relation) -> Result<Relation> {
         let status = if r.status.is_empty() { "active" } else { r.status.as_str() };
+        let until = if status == "ended" { r.until_chapter_id } else { None };
         let id = {
             let c = self.c();
             if r.id > 0 {
                 c.execute(
-                    "UPDATE relations SET a_id = ?2, b_id = ?3, kind = ?4, detail = ?5, status = ?6, since_chapter_id = ?7, updated_at = ?8 WHERE id = ?1",
-                    params![r.id, r.a_id, r.b_id, r.kind.trim(), r.detail, status, r.since_chapter_id, now()],
+                    "UPDATE relations SET a_id = ?2, b_id = ?3, kind = ?4, detail = ?5, status = ?6, since_chapter_id = ?7, updated_at = ?8, until_chapter_id = ?9 WHERE id = ?1",
+                    params![r.id, r.a_id, r.b_id, r.kind.trim(), r.detail, status, r.since_chapter_id, now(), until],
                 )?;
                 r.id
             } else {
                 c.execute(
-                    "INSERT INTO relations (book_id, a_id, b_id, kind, detail, status, since_chapter_id, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![r.book_id, r.a_id, r.b_id, r.kind.trim(), r.detail, status, r.since_chapter_id, now()],
+                    "INSERT INTO relations (book_id, a_id, b_id, kind, detail, status, since_chapter_id, updated_at, until_chapter_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![r.book_id, r.a_id, r.b_id, r.kind.trim(), r.detail, status, r.since_chapter_id, now(), until],
                 )?;
                 c.last_insert_rowid()
             }
@@ -1757,6 +1795,59 @@ impl Db {
 
     pub fn delete_reveal_event(&self, id: i64) -> Result<()> {
         self.c().execute("DELETE FROM reveal_events WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ---------- 角色知识 ----------
+
+    pub fn list_book_knowledge(&self, book_id: i64) -> Result<Vec<Knowledge>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!("SELECT {KNOW_COLS} FROM knowledge k JOIN reveals r ON r.id = k.reveal_id WHERE r.book_id = ?1 ORDER BY k.id"))?;
+        let rows = st.query_map([book_id], knowledge_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_knowledge(&self, id: i64) -> Result<Option<Knowledge>> {
+        let sql = format!("SELECT {KNOW_COLS} FROM knowledge k WHERE k.id = ?1");
+        Ok(self.c().query_row(&sql, [id], knowledge_row).optional()?)
+    }
+
+    /// 新建（id 为 0）或更新一条角色知识；新建时同一个人对同一个秘密在同一章只留最新一条。
+    pub fn save_knowledge(&self, k: &Knowledge) -> Result<Knowledge> {
+        let source = normalize_source(&k.source);
+        let id = {
+            let c = self.c();
+            if k.id > 0 {
+                c.execute(
+                    "UPDATE knowledge SET reveal_id = ?2, entry_id = ?3, chapter_id = ?4, source = ?5, misread = ?6, note = ?7, quote = ?8 WHERE id = ?1",
+                    params![k.id, k.reveal_id, k.entry_id, k.chapter_id, source, k.misread, k.note.trim(), k.quote.trim()],
+                )?;
+                k.id
+            } else {
+                c.execute("DELETE FROM knowledge WHERE reveal_id = ?1 AND entry_id = ?2 AND chapter_id IS ?3", params![k.reveal_id, k.entry_id, k.chapter_id])?;
+                c.execute(
+                    "INSERT INTO knowledge (reveal_id, entry_id, chapter_id, source, misread, note, quote, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![k.reveal_id, k.entry_id, k.chapter_id, source, k.misread, k.note.trim(), k.quote.trim(), now()],
+                )?;
+                c.last_insert_rowid()
+            }
+        };
+        Ok(self.get_knowledge(id)?.expect("刚保存的角色知识"))
+    }
+
+    pub fn delete_knowledge(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM knowledge WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// 这一章上次模型逻辑审校的结果，没审过时为 Null
+    pub fn chapter_logic(&self, id: i64) -> Result<serde_json::Value> {
+        let raw: Option<String> = self.c().query_row("SELECT logic FROM chapters WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(raw.map(json_value).unwrap_or(serde_json::Value::Null))
+    }
+
+    pub fn set_chapter_logic(&self, id: i64, logic: &serde_json::Value) -> Result<()> {
+        self.c().execute("UPDATE chapters SET logic = ?2 WHERE id = ?1", params![id, value_json(logic)])?;
         Ok(())
     }
 

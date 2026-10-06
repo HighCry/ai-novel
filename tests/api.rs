@@ -25,12 +25,14 @@ const UNIVERSAL_JSON: &str = r#"{
  "relations":[{"a":"林凡","b":"黑袍人","kind":"敌对","detail":"藏经阁对峙","status":"active"}],
  "reveals":[{"id":1,"step":"clue","quote":"锁链上刻着铸造的纹路","note":"给了天轨来历的线索"}],
  "reveals_new":[],
+ "knowledge":[{"who":"陈渊","id":2,"source":"亲眼所见","misread":"false","note":"看出她不是普通医修","quote":"陈渊盯着她的药箱"}],
  "secrets":[
   {"title":"天轨的来历","truth":"天轨是伪神铸造的锁链","misread":"天轨是天道法则","gap":"好奇","terms":["伪神","铸天者"],"exceptions":["天轨护道盟"],"entries":["姜沉雪","不存在的条目"],"seed_at":1,"seed_note":"矿奴说天上那道光每年会暗一次","clue_at":"第3章","clue_note":"锁链上刻着铸造的纹路","reveal_at":40,"payoff":"主角定下弑神的目标","done":[{"step":"seed","chapter":1,"note":"第一章提到天上的光"},{"step":"揭开","chapter":99}]},
-  {"title":"姜沉雪的身份","truth":"她是逆命司的暗桩","gap":"惊奇的反转","terms":"逆命司暗桩、暗桩","seed_at":2,"seed_note":"她的药箱里有逆命司的香","reveal_at":3,"done":[]}
+  {"title":"姜沉雪的身份","truth":"她是逆命司的暗桩","gap":"惊奇的反转","terms":"逆命司暗桩、暗桩","seed_at":2,"seed_note":"她的药箱里有逆命司的香","reveal_at":3,"done":[],
+   "knows":[{"who":"姜沉雪","chapter":0,"source":"本来就知道"},{"who":"陈渊","chapter":"第2章","source":"听说","misread":"是","note":"以为她只是回春堂的医修"},{"who":"不存在的人","chapter":1},{"who":"姜沉雪","chapter":99}]}
  ],
  "tension":7,"emotion":"紧张","cool_points":[{"type":"揭秘","level":"小","desc":"发现字条"}],"hook":{"type":"悬念预知","desc":"字条落款"},"debts":["字条是谁留的"],"comment":"节奏紧凑",
- "issues":[{"severity":"high","type":"能力矛盾","quote":"林凡御剑飞行","problem":"炼气期不能御剑","suggestion":"改成轻功"}],
+ "issues":[{"severity":"high","type":"能力矛盾","quote":"林凡御剑飞行","problem":"炼气期不能御剑","suggestion":"改成轻功","rewrite":"林凡施展轻功掠过屋脊"}],
  "scores":{"hook":8,"pacing":7,"payoff":6,"character":7,"ending":8,"readability":9},
  "summary":"节奏不错","strengths":["开头快"],"problems":[],
  "techniques":["打斗用短句连发","每个动作都有结果"],"rhythm":"短句为主","dialogue":"无","imitate":"动作要有因果",
@@ -270,9 +272,9 @@ async fn full_writing_flow() {
         applied,
         json!({
             "created": 1, "updated": 1, "threads_added": 1, "threads_progressed": 0, "threads_resolved": 1, "relations": 1, "reveal_steps": 0, "reveals_added": 0,
-            "events": 0, "deadlines_added": 0, "deadlines_done": 0,
+            "knowledge": 0, "events": 0, "deadlines_added": 0, "deadlines_done": 0,
         }),
-        "没有揭示计划时，提取出的揭示进度对不上任何秘密，不入库"
+        "没有揭示计划时，提取出的揭示进度和角色知识对不上任何秘密，不入库"
     );
     let entries = c.get(&format!("/api/books/{bid}/entries")).await;
     let lin_now = entries.as_array().unwrap().iter().find(|e| e["id"] == lin["id"]).unwrap();
@@ -913,6 +915,7 @@ async fn reveal_plan_flow() {
     let (ch1_id, ch2_id, ch3_id) = (ch1["id"].as_i64().unwrap(), ch2["id"].as_i64().unwrap(), ch3["id"].as_i64().unwrap());
     let jiang = c.post(&format!("/api/books/{bid}/entries"), json!({ "kind": "character", "name": "姜沉雪", "description": "回春堂的医修", "secret": "逆命司第七席" })).await;
     let jid = jiang["id"].as_i64().unwrap();
+    c.post(&format!("/api/books/{bid}/entries"), json!({ "kind": "character", "name": "陈渊", "role": "主角" })).await;
 
     // 设定进展：写到第3章起补一句；写法看不懂、内容为空都报错
     let prog = c.post(&format!("/api/entries/{jid}/progressions"), json!({ "gate": "3章", "mode": "add", "text": "她其实是逆命司的暗桩" })).await;
@@ -941,9 +944,9 @@ async fn reveal_plan_flow() {
     assert_eq!(secrets[0]["seen"], json!([{ "term": "伪神", "chapter": 2 }]));
     assert_eq!(secrets[1]["seen"], json!([]));
 
-    // 采纳：章号写成「第3章」也认，泄露词数组和字符串都认，对不上的条目名和章号跳过
+    // 采纳：章号写成「第3章」也认，泄露词数组和字符串都认，对不上的条目名、人名和章号跳过；知情的人记成角色知识
     let applied = c.post(&format!("/api/books/{bid}/reveals/plan"), json!({ "secrets": secrets })).await;
-    assert_eq!(applied, json!({ "created": 2, "updated": 0, "events": 1 }));
+    assert_eq!(applied, json!({ "created": 2, "updated": 0, "events": 1, "knows": 2 }));
     let list = c.get(&format!("/api/books/{bid}/reveals")).await;
     assert_eq!((list["written"].as_i64(), list["chapters"].as_i64()), (Some(2), Some(3)));
     let sky = list["reveals"].as_array().unwrap().iter().find(|r| r["title"] == "天轨的来历").unwrap().clone();
@@ -952,8 +955,19 @@ async fn reveal_plan_flow() {
     assert_eq!((id_card["gap"].as_str(), id_card["terms"].as_str()), (Some("惊奇"), Some("逆命司暗桩、暗桩")));
     assert_eq!(sky["events"][0]["number"], 1);
     assert_eq!(sky["events"][0]["step"], "seed");
+    let knows: Vec<(String, Option<i64>, bool)> = id_card["knows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["name"].as_str().unwrap().to_string(), k["number"].as_i64(), k["misread"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(knows, vec![("姜沉雪".to_string(), None, false), ("陈渊".to_string(), Some(2), true)], "开篇前就知道的排前面，「是」算误会");
+    assert_eq!(id_card["knows"][1]["source"], "被告知");
     let again = c.post(&format!("/api/books/{bid}/reveals/plan"), json!({ "secrets": secrets })).await;
     assert_eq!((again["created"].as_i64(), again["updated"].as_i64()), (Some(0), Some(2)), "同标题的秘密再采纳一次是更新");
+    let list_again = c.get(&format!("/api/books/{bid}/reveals")).await;
+    let card_again = list_again["reveals"].as_array().unwrap().iter().find(|r| r["title"] == "姜沉雪的身份").unwrap().clone();
+    assert_eq!(card_again["knows"].as_array().unwrap().len(), 2, "同一个人同一章的知情只留一条");
 
     // 第2章：埋姜沉雪的种子，天轨的来历只能挂钩子，两条都在禁区，真相一句都不给
     let ctx2 = c.get(&format!("/api/books/{bid}/context?chapter_id={ch2_id}")).await;
@@ -990,7 +1004,7 @@ async fn reveal_plan_flow() {
     ext["chapter_id"] = json!(ch3_id);
     ext["reveals_new"] = json!([{ "title": "回春堂的地窖", "truth": "地窖通往逆命司据点", "gap": "好奇", "quote": "药铺后面有扇小门" }, { "title": "天轨的来历" }]);
     let applied = c.post(&format!("/api/books/{bid}/apply_updates"), ext).await;
-    assert_eq!((applied["reveal_steps"].as_i64(), applied["reveals_added"].as_i64()), (Some(1), Some(1)), "{applied}");
+    assert_eq!((applied["reveal_steps"].as_i64(), applied["reveals_added"].as_i64(), applied["knowledge"].as_i64()), (Some(1), Some(1), Some(1)), "{applied}");
     let list = c.get(&format!("/api/books/{bid}/reveals")).await;
     let sky = list["reveals"].as_array().unwrap().iter().find(|r| r["title"] == "天轨的来历").unwrap().clone();
     let steps: Vec<(i64, &str)> = sky["events"].as_array().unwrap().iter().map(|e| (e["number"].as_i64().unwrap(), e["step"].as_str().unwrap())).collect();
@@ -1014,8 +1028,149 @@ async fn reveal_plan_flow() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     c.ok(reqwest::Method::DELETE, &format!("/api/reveals/{}", cellar["id"]), None).await;
     let replaced = c.post(&format!("/api/books/{bid}/reveals/plan"), json!({ "replace": true, "secrets": [{ "title": "唯一的秘密", "reveal_at": 9 }] })).await;
-    assert_eq!(replaced, json!({ "created": 1, "updated": 0, "events": 0 }));
+    assert_eq!(replaced, json!({ "created": 1, "updated": 0, "events": 0, "knows": 0 }));
     assert_eq!(c.get(&format!("/api/books/{bid}/reveals")).await["reveals"].as_array().unwrap().len(), 1, "整份替换会删掉原来的秘密和进度");
+}
+
+/// 叙事逻辑第三期：角色知识、人物知情、关系在哪一章结束、模型逻辑审校
+#[tokio::test]
+async fn knowledge_and_logic_check() {
+    let seen: Seen = Arc::default();
+    let mock = Router::new().route("/v1/models", get(mock_models)).route("/v1/chat/completions", post(mock_chat)).with_state(seen.clone());
+    let mock_addr = spawn(mock).await;
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let provider = json!({ "id": "mock", "name": "模拟接口", "base_url": format!("http://{mock_addr}/v1"), "api_key": API_KEY });
+    c.put("/api/settings", json!({ "providers": [provider], "writer": { "provider_id": "mock", "model": "mock-writer", "temperature": 0.9 }, "analyst": { "provider_id": "mock", "model": "mock-analyst", "temperature": 0.2 } })).await;
+
+    let bid = c.post("/api/books", json!({ "title": "大梦", "genre": "玄幻" })).await["id"].as_i64().unwrap();
+    let cl = &c;
+    let chapter = |title: &str, content: &str, outline: &str| json!({ "title": title, "content": content, "outline": outline });
+    let new_chapter = |body: Value| async move { cl.post(&format!("/api/books/{bid}/chapters"), body).await["id"].as_i64().unwrap() };
+    let ch1 = new_chapter(chapter("矿难", "陈渊在矿洞里醒来，手心多了一道血纹。", "")).await;
+    let ch2 = new_chapter(chapter("药铺", "陈渊走进回春堂，姜沉雪在配药。", "")).await;
+    let ch3 = new_chapter(chapter("对峙", "", "陈渊和王奎在回春堂对峙，姜沉雪旁观")).await;
+    let ch4 = new_chapter(chapter("上路", "", "陈渊独自上路，王奎追了上来")).await;
+    let person = |name: &str, role: &str| json!({ "kind": "character", "name": name, "role": role });
+    let new_entry = |book: i64, body: Value| async move { cl.post(&format!("/api/books/{book}/entries"), body).await["id"].as_i64().unwrap() };
+    let chen = new_entry(bid, person("陈渊", "主角")).await;
+    let jiang = new_entry(bid, person("姜沉雪", "重要配角")).await;
+    let wang = new_entry(bid, person("王奎", "反派")).await;
+    let other = c.post("/api/books", json!({ "title": "别的书" })).await["id"].as_i64().unwrap();
+    let outsider = new_entry(other, person("外人", "主角")).await;
+    let secret = |body: Value| async move { cl.post(&format!("/api/books/{bid}/reveals"), body).await["id"].as_i64().unwrap() };
+    let card = secret(json!({ "title": "陈渊的禁物", "truth": "陈渊的血纹能吞掉别人的寿元", "gap": "好奇", "reveal_at": 1, "entry_ids": [chen] })).await;
+    c.post(&format!("/api/reveals/{card}/events"), json!({ "chapter_id": ch1, "step": "reveal" })).await;
+    let identity = secret(json!({ "title": "姜沉雪的身份", "truth": "她是逆命司的暗桩", "gap": "惊奇", "terms": "逆命司暗桩", "reveal_at": 30 })).await;
+    let backer = secret(json!({ "title": "王奎的靠山", "truth": "王奎背后是护道盟执事", "gap": "好奇", "terms": "护道盟执事", "reveal_at": 20 })).await;
+
+    // 角色知识：来源统一写法；秘密、人物、章节都要是这本书的
+    let know = |body: Value| async move { cl.post(&format!("/api/books/{bid}/knowledge"), body).await };
+    let k1 = know(json!({ "reveal_id": card, "entry_id": chen, "source": "自己的秘密" })).await;
+    assert_eq!((k1["source"].as_str(), k1["chapter_id"].as_i64()), (Some("本来就知道"), None));
+    know(json!({ "reveal_id": identity, "entry_id": jiang, "source": "本来就知道" })).await;
+    let k3 = know(json!({ "reveal_id": backer, "entry_id": wang, "source": "本来就知道" })).await;
+    let k4 = know(json!({ "reveal_id": identity, "entry_id": chen, "chapter_id": ch2, "source": "听说", "misread": true, "note": "以为她只是回春堂的医修" })).await;
+    assert_eq!(k4["source"], "被告知");
+    for bad in [json!({ "reveal_id": card, "entry_id": outsider }), json!({ "reveal_id": 9999, "entry_id": chen }), json!({ "reveal_id": card, "entry_id": chen, "chapter_id": 9999 })] {
+        let (status, _) = c.send(reqwest::Method::POST, &format!("/api/books/{bid}/knowledge"), Some(bad)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let patched = c.patch(&format!("/api/knowledge/{}", k3["id"]), json!({ "note": "靠山就是护道盟执事" })).await;
+    assert_eq!(patched["note"], "靠山就是护道盟执事");
+    let (status, _) = c.send(reqwest::Method::PATCH, &format!("/api/knowledge/{}", k3["id"]), Some(json!({ "entry_id": outsider }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 秘密列表带上知情记录，知情表的列主角排前面，别的书的人不算
+    let list = c.get(&format!("/api/books/{bid}/reveals")).await;
+    let cast: Vec<&str> = list["cast"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(cast, vec!["陈渊", "姜沉雪", "王奎"]);
+    let find = |list: &Value, id: i64| list["reveals"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap().clone();
+    let id_row = find(&list, identity);
+    let names: Vec<&str> = id_row["knows"].as_array().unwrap().iter().map(|k| k["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["姜沉雪", "陈渊"]);
+    assert_eq!((id_row["knows"][1]["when"].as_str(), id_row["knows"][1]["number"].as_i64()), (Some("第2章，被告知"), Some(2)));
+
+    // 写第3章：视角人物知道、误会、不知道什么，在场的人不知道主角的底牌；读者还不知道的不给真相
+    let sections = |v: &Value, title: &str| v["sections"].as_array().unwrap().iter().find(|s| s["title"] == title).map(|s| s["body"].as_str().unwrap().to_string()).unwrap_or_default();
+    let ctx3 = c.get(&format!("/api/books/{bid}/context?chapter_id={ch3}")).await;
+    let people = sections(&ctx3, "人物知情（截至上一章）");
+    for want in [
+        "视角人物「陈渊」：",
+        "· 知道「陈渊的禁物」（本来就知道）",
+        "· 误会「姜沉雪的身份」（第2章，被告知），以为她只是回春堂的医修——揭开前照他的误会写",
+        "· 不知道：「王奎的靠山」",
+        "· 姜沉雪：不知道「陈渊的禁物」",
+        "· 王奎：知道「王奎的靠山」（本来就知道）；不知道「陈渊的禁物」",
+    ] {
+        assert!(people.contains(want), "缺少「{want}」：\n{people}");
+    }
+    assert!(!people.contains("护道盟执事"), "读者还不知道的只给标题，不给他知道的内容：{people}");
+    let all3 = ctx3["sections"].to_string();
+    for leak in ["她是逆命司的暗桩", "王奎背后是护道盟执事", "靠山就是护道盟执事"] {
+        assert!(!all3.contains(leak), "第3章不该出现「{leak}」：{all3}");
+    }
+
+    // 定稿第3章：关系结束记下章节，王奎知道了主角的底牌；对不上的人和秘密跳过
+    c.post(&format!("/api/books/{bid}/relations"), json!({ "a_id": chen, "b_id": jiang, "kind": "盟友", "since_chapter_id": ch1 })).await;
+    c.patch(&format!("/api/chapters/{ch3}"), json!({ "content": "王奎盯着陈渊的手心。林凡御剑飞行而来。" })).await;
+    let applied = c
+        .post(
+            &format!("/api/books/{bid}/apply_updates"),
+            json!({
+                "chapter_id": ch3,
+                "relations": [{ "a": "陈渊", "b": "姜沉雪", "kind": "盟友", "status": "ended", "detail": "姜沉雪不辞而别" }],
+                "knowledge": [
+                    { "who": "王奎", "id": card, "source": "亲眼", "misread": false, "note": "看见血纹吞了护卫的寿元", "quote": "王奎盯着陈渊的手心" },
+                    { "who": "没这个人", "id": card },
+                    { "who": "王奎", "id": 9999 }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!((applied["relations"].as_i64(), applied["knowledge"].as_i64()), (Some(1), Some(1)), "{applied}");
+    let rel = c.get(&format!("/api/books/{bid}/relations")).await[0].clone();
+    assert_eq!((rel["status"].as_str(), rel["until_chapter_id"].as_i64()), (Some("ended"), Some(ch3)));
+    let rels3 = sections(&c.get(&format!("/api/books/{bid}/context?chapter_id={ch3}")).await, "人物关系");
+    assert!(rels3.contains("陈渊 与 姜沉雪：盟友") && !rels3.contains("已经结束"), "第3章里才结束，回改第3章时还是盟友：{rels3}");
+    let ctx4 = c.get(&format!("/api/books/{bid}/context?chapter_id={ch4}")).await;
+    let people4 = sections(&ctx4, "人物知情（截至上一章）");
+    assert!(people4.contains("· 王奎：知道「陈渊的禁物」（第3章，亲历）：看见血纹吞了护卫的寿元；知道「王奎的靠山」（本来就知道）"), "读者知道的附上内容：{people4}");
+    let reopened = c.patch(&format!("/api/relations/{}", rel["id"]), json!({ "status": "active" })).await;
+    assert_eq!(reopened["until_chapter_id"], Value::Null, "关系恢复后不留结束章节");
+
+    // 定稿提取：列出读者进度和已经知情的人，要求输出 knowledge
+    let pv = c.post("/api/ai/preview", json!({ "task": "extract", "book_id": bid, "chapter_id": ch2 })).await;
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains(&format!("{card}. 陈渊的禁物｜陈渊的血纹能吞掉别人的寿元｜第1章揭开｜读者已经知道｜已经知情：陈渊")), "{user}");
+    assert!(user.contains(&format!("{identity}. 姜沉雪的身份｜她是逆命司的暗桩｜逆命司暗桩｜第30章揭开｜读者还不知道｜已经知情：姜沉雪")) && user.contains("\"knowledge\""), "{user}");
+
+    // 逻辑审校：作者层台账、视角人物、人物知情都给；用写作模型，温度按分析模型
+    let pv = c.post("/api/ai/preview", json!({ "task": "logic_check", "book_id": bid, "chapter_id": ch3 })).await;
+    assert_eq!(pv["role"], "writer");
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    for want in ["【秘密台账（作者层", "「王奎的靠山」（好奇；读者还不知道，计划第20章揭开）真相：王奎背后是护道盟执事", "写本章之前知情：王奎（本来就知道）", "【视角人物】陈渊", "【人物知情（截至上一章）】", "时间：", "在场：", "来源："] {
+        assert!(user.contains(want), "缺少「{want}」：{user}");
+    }
+    let (status, _) = c.send(reqwest::Method::POST, "/api/ai/json", Some(json!({ "task": "logic_check", "book_id": bid, "chapter_id": ch4 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "没有正文不审");
+    let r = c.post("/api/ai/json", json!({ "task": "logic_check", "book_id": bid, "chapter_id": ch3 })).await;
+    let sent = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!((sent["model"].as_str(), sent["temperature"].as_f64().map(|t| (t * 10.0).round())), (Some("mock-writer"), Some(2.0)));
+    assert_eq!((r["issues"][0]["found"].as_bool(), r["at"].is_i64()), (Some(true), true), "{r}");
+    let saved = c.get(&format!("/api/chapters/{ch3}/logic")).await;
+    assert_eq!((saved["stale"].as_bool(), saved["issues"][0]["rewrite"].as_str()), (Some(false), Some("林凡施展轻功掠过屋脊")));
+    c.patch(&format!("/api/chapters/{ch3}"), json!({ "content": "王奎盯着陈渊的手心。" })).await;
+    assert_eq!(c.get(&format!("/api/chapters/{ch3}/logic")).await["stale"], true, "正文改过后结果标成过时");
+    assert_eq!(c.get(&format!("/api/chapters/{ch1}/logic")).await, Value::Null);
+
+    // 删掉一条知情、删掉秘密时它的知情一起删
+    c.ok(reqwest::Method::DELETE, &format!("/api/knowledge/{}", k4["id"]), None).await;
+    c.ok(reqwest::Method::DELETE, &format!("/api/reveals/{backer}"), None).await;
+    let list = c.get(&format!("/api/books/{bid}/reveals")).await;
+    assert_eq!(find(&list, identity)["knows"].as_array().unwrap().len(), 1);
+    let people4 = sections(&c.get(&format!("/api/books/{bid}/context?chapter_id={ch4}")).await, "人物知情（截至上一章）");
+    assert!(!people4.contains("王奎的靠山"), "{people4}");
 }
 
 /// 热梗、榜单、读者偏好：预先写好缓存，不碰外网

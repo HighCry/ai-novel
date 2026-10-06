@@ -444,6 +444,45 @@ pub fn normalize_step(step: &str) -> Option<&'static str> {
     }
 }
 
+/// 角色知识：某个人物从第几章起知道（或误会）秘密台账里的一条，见 docs/叙事逻辑架构方案.md 5.1。
+/// 同一个人对同一个秘密可以有好几条，比如先误会、后来才知道真相；写某一章时看这一章之前最新的那条。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Knowledge {
+    pub id: i64,
+    pub reveal_id: i64,
+    pub entry_id: i64,
+    /// 在哪一章知道的；空表示故事开始前就知道，比如秘密本来就是他自己的
+    pub chapter_id: Option<i64>,
+    /// 亲历 / 被告知 / 推断 / 本来就知道
+    pub source: String,
+    /// 误会：他以为知道了，信的却是错的
+    pub misread: bool,
+    /// 他知道或以为的是什么；误会时写他信的说法
+    pub note: String,
+    /// 原文依据
+    pub quote: String,
+    pub created_at: i64,
+}
+
+/// 把模型或作者写的获知来源统一成「亲历 / 被告知 / 推断 / 本来就知道」，认不出时原样保留。
+pub fn normalize_source(source: &str) -> String {
+    let s = source.trim();
+    let has = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    let k = if has(&["本来", "早就", "一开始", "开篇前", "自己的", "innate"]) {
+        "本来就知道"
+    } else if has(&["告知", "告诉", "听说", "听闻", "told"]) {
+        "被告知"
+    } else if has(&["推断", "推测", "推理", "猜", "infer"]) {
+        "推断"
+    } else if has(&["亲历", "亲眼", "目睹", "经历", "撞见", "witness", "saw"]) {
+        "亲历"
+    } else {
+        return s.to_string();
+    };
+    k.to_string()
+}
+
 /// 设定进展：写到某一章（或某一卷）起，给设定描述补一段或整段换掉，参考 Novelcrafter 的 Progressions。
 /// 描述里只写读者一开始就能知道的，后面才揭开的写成进展，写到那里 AI 才看得到。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -473,6 +512,8 @@ pub struct Relation {
     /// active / ended
     pub status: String,
     pub since_chapter_id: Option<i64>,
+    /// 在哪一章结束的；空表示没结束，或结束了但不知道是哪一章
+    pub until_chapter_id: Option<i64>,
     pub updated_at: i64,
 }
 
