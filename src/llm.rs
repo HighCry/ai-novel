@@ -87,9 +87,16 @@ pub fn endpoint(base_url: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
+/// 局域网地址（192.168、10、172.16～31 开头）：离开那个网络就连不上
+fn is_lan(url: &reqwest::Url) -> bool {
+    url.host_str().and_then(|h| h.parse::<std::net::Ipv4Addr>().ok()).is_some_and(|ip| ip.is_private())
+}
+
 fn net_err(e: reqwest::Error) -> anyhow::Error {
     let url = e.url().map(|u| u.to_string()).unwrap_or_default();
-    if e.is_connect() {
+    if e.is_connect() && e.url().is_some_and(is_lan) {
+        anyhow!("连不上模型接口 {url}：这是局域网地址，不在同一个 WiFi 里（比如手机用的是流量）就连不上，可以改填电脑的 Tailscale 地址（100 开头）")
+    } else if e.is_connect() {
         anyhow!("连不上模型接口 {url}：请检查接口地址、网络或代理")
     } else if e.is_timeout() {
         anyhow!("模型接口响应超时：{url}")
@@ -497,6 +504,14 @@ mod tests {
     fn endpoints() {
         assert_eq!(endpoint("https://api.x.com/v1/", "chat/completions"), "https://api.x.com/v1/chat/completions");
         assert_eq!(endpoint("https://api.x.com/v1/chat/completions", "models"), "https://api.x.com/v1/models");
+    }
+
+    #[test]
+    fn spots_lan_addresses() {
+        let lan = |u: &str| is_lan(&u.parse().unwrap());
+        assert!(lan("http://192.168.130.91:8080/v1") && lan("http://10.0.0.5/v1") && lan("http://172.20.1.1/v1"));
+        assert!(!lan("http://100.88.100.68:8080/v1"), "Tailscale 地址到哪都连得上");
+        assert!(!lan("http://127.0.0.1:8080/v1") && !lan("https://api.x.com/v1"));
     }
 
     #[test]
