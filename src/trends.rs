@@ -1,8 +1,8 @@
 //! 热点和榜单：微博、抖音、B站、百度的热搜，起点手机版男女频榜单（前 60 本），番茄分类榜（前 50 本）；
 //! 统计题材分布、书名高频词和简介里的卖点标签；AI 从热搜里挑能写进网文的梗，按榜单推断读者偏好。
 //! 只在作者打开时抓，缓存 6 小时。
-//! 番茄榜单里的书名、作者、简介是加密字体（私用区字符），书页的标题、关键词和描述是明文：
-//! 对照着学会每个私用区字符对应的字，学到的对照表存起来，字体换了就重新学。
+//! 番茄榜单里的书名、作者、简介是加密字体（私用区字符），内置了当前字体的完整对照表；
+//! 字体换了先下载新字体和内置的比字形（fanqie_font），比不出来的再对照书页里的明文学，学到的存起来。
 
 use crate::ai::{run_json, AiRequest};
 use crate::api::{bad_request, require_book, ApiResult, AppError};
@@ -141,7 +141,7 @@ fn check_status(url: &str, status: reqwest::StatusCode) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn get_text(url: &str, ua: &str, referer: Option<&str>) -> anyhow::Result<String> {
+async fn get(url: &str, ua: &str, referer: Option<&str>) -> anyhow::Result<reqwest::Response> {
     check_blocked(url)?;
     let mut req = client().get(url).header("User-Agent", ua).header("Accept-Language", "zh-CN,zh;q=0.9");
     if let Some(r) = referer {
@@ -149,7 +149,11 @@ async fn get_text(url: &str, ua: &str, referer: Option<&str>) -> anyhow::Result<
     }
     let resp = req.send().await.with_context(|| format!("连不上 {url}"))?;
     check_status(url, resp.status())?;
-    Ok(resp.text().await?)
+    Ok(resp)
+}
+
+async fn get_text(url: &str, ua: &str, referer: Option<&str>) -> anyhow::Result<String> {
+    Ok(get(url, ua, referer).await?.text().await?)
 }
 
 /// 从番茄书页的额度里拿 n 页，返回实际拿到的页数
@@ -355,6 +359,9 @@ pub struct Glyphs {
     /// 字体文件名里的编号，换了字体对照表就作废
     pub font: String,
     pub map: BTreeMap<u32, char>,
+    /// 已经下载这个字体和内置的比过字形（不管认出多少），不用再比
+    #[serde(default)]
+    pub compared: bool,
 }
 
 /// 对照加密文字和明文学字：去掉空白后逐字对齐，私用区字符记下对应的字；
@@ -452,6 +459,14 @@ pub fn parse_fanqie(html: &str) -> Option<(Vec<FanqieRaw>, Value, String)> {
     Some((fanqie_books(&rank["book_list"]), rank["rankCategoryTypeList"].clone(), font_id))
 }
 
+/// 榜单页样式表里字体文件的完整地址
+pub fn fanqie_font_url(html: &str) -> Option<String> {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    let re = URL.get_or_init(|| Regex::new(r#"(?:https?:)?//[^\s"'()]+/awesome-font/c/[0-9a-z]+\.woff2"#).expect("正则"));
+    let url = re.find(html)?.as_str();
+    Some(if url.starts_with("//") { format!("https:{url}") } else { url.to_string() })
+}
+
 fn unescape(s: &str) -> String {
     s.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").replace("&amp;", "&")
 }
@@ -487,7 +502,7 @@ pub fn parse_fanqie_page(html: &str) -> (Option<String>, Option<String>, Option<
 /// 存下来的对照表；内置的对照表是同一个字体时，用来补上还没学过的字
 fn load_glyphs(db: &Db, font: &str) -> Glyphs {
     let saved: Glyphs = db.get_kv(GLYPH_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    let mut g = if saved.font == font { saved } else { Glyphs { font: font.to_string(), map: BTreeMap::new() } };
+    let mut g = if saved.font == font { saved } else { Glyphs { font: font.to_string(), ..Default::default() } };
     if let Some(seed) = seed_glyphs().filter(|s| s.font == font) {
         for (k, v) in &seed.map {
             g.map.entry(*k).or_insert(*v);
@@ -496,14 +511,42 @@ fn load_glyphs(db: &Db, font: &str) -> Glyphs {
     g
 }
 
-/// 预先学好的番茄字体对照表：番茄的书页限流很严，现学要很久才能认全；番茄换了字体就用不上，回到现学
-fn seed_glyphs() -> Option<&'static Glyphs> {
+/// 内置的番茄字体对照表（362 个字全认得）：番茄的书页限流很严，现学要很久才能认全；
+/// 番茄换了字体就对不上了，这时拿它和对应的字体文件去认新字体（fanqie_font）
+pub(crate) fn seed_glyphs() -> Option<&'static Glyphs> {
     static SEED: OnceLock<Option<Glyphs>> = OnceLock::new();
     SEED.get_or_init(|| serde_json::from_str(include_str!("fanqie_glyphs.json")).ok()).as_ref()
 }
 
 fn wan(n: i64, unit: &str) -> String {
     if n >= 10_000 { format!("{:.1}万{unit}", n as f64 / 10_000.0) } else { format!("{n}{unit}") }
+}
+
+/// 番茄换了字体、榜单里还有不认得的字，并且还没下载这个字体比过字形
+fn wants_font(glyphs: &Glyphs, raws: &[FanqieRaw]) -> bool {
+    !glyphs.compared
+        && !glyphs.font.is_empty()
+        && raws.iter().flat_map(|r| r.title.chars().chain(r.author.chars()).chain(r.desc.chars())).any(|c| is_pua(c) && !glyphs.map.contains_key(&(c as u32)))
+}
+
+/// 下载番茄的新字体和内置的比字形，认出来的字补进对照表；下载失败下次再试
+async fn compare_font(glyphs: &mut Glyphs, url: &str, referer: &str) {
+    let Some(seed) = seed_glyphs() else { return };
+    let found = async {
+        let bytes = get(url, UA, Some(referer)).await?.bytes().await?;
+        tokio::task::spawn_blocking(move || crate::fanqie_font::recognize_font(&bytes, &seed.map)).await?
+    };
+    match found.await {
+        Ok(found) => {
+            let before = glyphs.map.len();
+            for (k, v) in found {
+                glyphs.map.entry(k).or_insert(v);
+            }
+            glyphs.compared = true;
+            tracing::info!("番茄换了字体 {}，比字形认出 {} 个字", glyphs.font, glyphs.map.len() - before);
+        }
+        Err(e) => tracing::warn!("番茄新字体 {}：{e:#}", glyphs.font),
+    }
 }
 
 /// 打开书页对照明文学字：每轮挑生字最多的几本同时打开，学到的字马上用来重新挑，直到认全或用完名额。
@@ -572,6 +615,9 @@ async fn fetch_fanqie(db: &Db, gender: u8, list: u8, category: &str) -> anyhow::
         Err(e) => tracing::warn!("番茄榜单接口：{e:#}"),
     }
     let mut glyphs = load_glyphs(db, &font);
+    if let Some(url) = fanqie_font_url(&html).filter(|_| wants_font(&glyphs, &raws)) {
+        compare_font(&mut glyphs, &url, &page_url).await;
+    }
     learn_glyphs(&mut glyphs.map, &raws).await;
     if let Ok(s) = serde_json::to_string(&glyphs) {
         let _ = db.set_kv(GLYPH_KEY, &s);
@@ -1088,6 +1134,26 @@ mod tests {
         db.set_kv(GLYPH_KEY, &json!({ "font": seed.font, "map": { "57344": "学" } }).to_string()).unwrap();
         let g = load_glyphs(&db, &seed.font);
         assert_eq!((g.map.get(&0xE000), g.map.len()), (Some(&'学'), seed.map.len() + 1), "存下来的和内置的合在一起");
+    }
+
+    #[test]
+    fn finds_fanqie_font_and_compares_it_once() {
+        let css = r#"@font-face{font-family:DNMrHsV173Pd4pgy;src:url(https://lf6-awef.bytetos.com/obj/awesome-font/c/dc027189e0ba4cd.woff2)format("woff2"),url(https://x/a.woff)}"#;
+        assert_eq!(fanqie_font_url(css).as_deref(), Some("https://lf6-awef.bytetos.com/obj/awesome-font/c/dc027189e0ba4cd.woff2"));
+        assert_eq!(fanqie_font_url("src:url(//cdn.example.com/obj/awesome-font/c/abc123.woff2)").as_deref(), Some("https://cdn.example.com/obj/awesome-font/c/abc123.woff2"), "省略协议的地址补上 https");
+        assert_eq!(fanqie_font_url("<html>没有字体</html>"), None);
+
+        let raws = fanqie_books(&json!([{ "bookId": "1", "bookName": "\u{e3e8}局", "author": "沙茶", "abstract": "" }]));
+        let seed = seed_glyphs().expect("内置对照表能解析");
+        let db = Db::open_in_memory().unwrap();
+        assert!(!wants_font(&load_glyphs(&db, &seed.font), &raws), "内置的字体全认得，不用比");
+        let mut g = load_glyphs(&db, "换了的字体");
+        assert!(wants_font(&g, &raws), "换了字体、有不认得的字，要比");
+        g.compared = true;
+        assert!(!wants_font(&g, &raws), "比过了不再比");
+        db.set_kv(GLYPH_KEY, &serde_json::to_string(&g).unwrap()).unwrap();
+        assert!(load_glyphs(&db, "换了的字体").compared, "比过的记下来，重启也不再比");
+        assert!(!load_glyphs(&db, "又换了一个").compared, "再换字体要重新比");
     }
 
     #[test]

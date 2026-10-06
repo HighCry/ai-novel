@@ -6,6 +6,7 @@ pub mod replace;
 pub mod teardown;
 pub mod timeline;
 pub mod trends;
+pub mod fanqie_font;
 pub mod continuity;
 pub mod db;
 pub mod export;

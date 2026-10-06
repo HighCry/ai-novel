@@ -25,6 +25,8 @@ desktop = ["dep:wry", "dep:tao", "dep:windows-sys"]
 [dependencies]
 wry = { version = "0.57", optional = true }
 tao = { version = "0.37", optional = true }
+ab_glyph = { version = "0.2", default-features = false, features = ["std"] }
+ab_glyph_rasterizer = "0.1"
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
@@ -41,6 +43,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wuff = { version = "0.2", default-features = false, features = ["brotli"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
