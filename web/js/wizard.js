@@ -2,6 +2,7 @@ import { api, streamInto } from './api.js';
 import { emit, modelReady } from './store.js';
 import { h, toast, modal, field, busy, promptBox } from './ui.js';
 import { openSettings, loadGenres, matchGenre } from './dialogs.js';
+import { outlineContract, outlineText } from './reveals.js';
 
 export const GENRES = ['都市脑洞', '都市高武', '都市日常', '玄幻', '仙侠修真', '历史穿越', '科幻末世', '悬疑灵异', '游戏竞技', '体育', '无限流', '系统流', '重生逆袭', '年代文', '种田', '古代言情', '现代言情', '幻想言情', '宫斗宅斗', '快穿'];
 const STEPS = ['创意', '选方案', '世界观', '人物', '总纲', '第一卷章纲'];
@@ -57,7 +58,7 @@ export function openWizard() {
   async function finish() {
     const id = await createBook();
     for (const o of d.outlines.filter((o) => o.checked)) {
-      await api.post(`/books/${id}/chapters`, { title: o.title, outline: o.outline, volume_id: d.volumeId });
+      await api.post(`/books/${id}/chapters`, { title: o.title, outline: outlineText(o), volume_id: d.volumeId });
     }
     m.close();
     toast('作品已创建，开始写作吧');
@@ -195,7 +196,8 @@ export function openWizard() {
         h('input', { type: 'checkbox', checked: o.checked, onchange: (e) => { o.checked = e.target.checked; } }),
         h('div', { class: 'grow' },
           h('input', { value: o.title, oninput: (e) => { o.title = e.target.value; }, placeholder: `第${i + 1}章标题` }),
-          h('textarea', { rows: 2, value: o.outline, oninput: (e) => { o.outline = e.target.value; } })))));
+          h('textarea', { rows: 2, value: o.outline, oninput: (e) => { o.outline = e.target.value; } }),
+          outlineContract(o)))));
     };
     const count = h('input', { type: 'number', min: 3, max: 30, value: d.count, class: 'num', oninput: (e) => { d.count = +e.target.value; } });
     const gen = h('button', { class: 'btn primary', onclick: (e) => busy(e.target, async () => {

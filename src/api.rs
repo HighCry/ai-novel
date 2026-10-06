@@ -801,6 +801,63 @@ pub fn mark_early_terms(d: &BookData, plan: &mut Value) {
     }
 }
 
+/// 给 chapter_outlines 的结果逐章标上 warnings：章纲里提前写出的泄露词、按计划该安排却没安排的投放、
+/// 前 10 章超出预算的新名词。章号接着已有的最后一章往下数，和生成时一样。
+pub fn mark_outline_contract(d: &BookData, plan: &mut Value) {
+    let start = d.chapters.iter().filter(|c| d.number(c).is_some()).count() as i64 + 1;
+    let open: Vec<&Reveal> = d.active_reveals().filter(|r| !d.revealed_before(r, None)).collect();
+    let Some(chapters) = plan.get_mut("chapters").and_then(Value::as_array_mut) else { return };
+    for (i, c) in chapters.iter_mut().enumerate() {
+        let n = start + i as i64;
+        let field = |k: &str| c[k].as_str().unwrap_or("").trim().to_string();
+        let text = [field("title"), field("outline"), field("hook")].join("\n");
+        let list = |k: &str| c[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+        let (declared, fresh) = (list("reveals"), list("new_terms"));
+        let mut warns = Vec::new();
+        for r in open.iter().filter(|r| r.reveal_at != Some(n)) {
+            let scan = mask_excluded(&text, &r.exception_list());
+            for t in r.term_list().iter().filter(|t| scan.contains(t.as_str())) {
+                let when = r.reveal_at.map_or_else(|| "还没排揭开".to_string(), |x| format!("计划第{x}章揭开"));
+                warns.push(format!("提前写出了「{t}」（「{}」{when}）", r.title.trim()));
+            }
+        }
+        let said = format!("{}\n{text}", declared.join("\n"));
+        for r in &open {
+            for (at, step) in [(r.seed_at, "埋种子"), (r.clue_at, "给线索"), (r.reveal_at, "揭开")] {
+                if at == Some(n) && !said.contains(r.title.trim()) {
+                    warns.push(format!("按计划这一章要{step}「{}」，章纲里没安排", r.title.trim()));
+                }
+            }
+        }
+        let max = crate::logic::new_term_limit(Some(n));
+        if n <= 10 && fresh.len() > max {
+            warns.push(format!("新出现 {} 个名词（{}），这一章建议不超过 {max} 个", fresh.len(), fresh.join("、")));
+        }
+        c["warnings"] = json!(warns);
+    }
+}
+
+/// 本章合同：视角人物、读者已经知道的秘密、本章投放清单、禁区、人物知情、前 10 章的新名词预算，
+/// 都按揭示计划和知情表现算，作者改了计划马上跟着变。
+pub async fn chapter_contract(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    let ch = st.db.get_chapter(id)?.ok_or_else(|| not_found("章节"))?;
+    let data = load_book_data(&st.db, ch.book_id)?;
+    let cur = data.chapter(id).ok_or_else(|| not_found("章节"))?;
+    let scan = format!("{}\n{}\n{}\n{}", cur.title, cur.outline, cur.beats, crate::text::tail_chars(&cur.content, 6000));
+    let present: Vec<&Entry> = memory::match_entries(data.entries_at(Some(cur)), &scan).into_iter().filter(|e| e.kind == "character").collect();
+    let number = data.number(cur);
+    Ok(Json(json!({
+        "number": number,
+        "has_plan": data.active_reveals().next().is_some(),
+        "pov": data.pov(cur).iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+        "known": memory::reader_known(&data, cur),
+        "delivery": memory::delivery(&data, cur),
+        "forbidden": memory::forbidden(&data, cur),
+        "people": memory::people_knowledge(&data, cur, &present),
+        "budget": number.filter(|n| *n <= 10).map(|n| crate::logic::new_term_limit(Some(n))),
+    })))
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct PlanApply {

@@ -683,6 +683,8 @@ function memoryPanel(body) {
   body.append(h('div', null,
     h('p', { class: 'hint' }, '长篇不崩的关键：每章写完点一次「定稿」，让 AI 记住发生了什么、人物有什么变化、埋了哪些伏笔。'),
     h('button', { class: 'btn primary block', onclick: () => openFinalize() }, '定稿本章：生成摘要，更新设定库和伏笔'),
+    groupTitle('本章合同'),
+    contractCard(ch),
     groupTitle('本章摘要'),
     summary,
     genSummary,
@@ -691,6 +693,28 @@ function memoryPanel(body) {
     groupTitle('上下文'),
     h('p', { class: 'hint' }, 'AI 写这一章时会看到：作品信息、世界观、大纲、前情提要、本章出场的设定、未回收的伏笔、检索到的相关前文、上一章结尾。'),
     h('button', { class: 'btn', onclick: () => openContext() }, '查看 AI 能看到的上下文')));
+}
+
+/** 本章合同：按揭示计划和知情表现算的视角人物、本章投放、禁区、人物知情和新名词预算，写正文时 AI 拿到的就是这些 */
+function contractCard(ch) {
+  const box = h('div', { class: 'contract-card' }, h('div', { class: 'hint' }, '正在读取本章合同…'));
+  api.get(`/chapters/${ch.id}/contract`).then((k) => {
+    box.innerHTML = '';
+    if (!k.has_plan && !k.people.length && !k.budget) {
+      box.append(h('p', { class: 'hint' }, '做一份揭示计划（检查 → 信息节奏）后，这里会列出本章该埋的种子、该给的线索、不能写破的秘密和人物知情。'));
+      return;
+    }
+    const row = (label, value) => (value ? h('div', { class: 'contract-row' }, h('b', null, label), typeof value === 'string' ? h('span', null, value) : value) : null);
+    const lines = (list) => (list.length ? h('div', { class: 'pre small' }, list.join('\n')) : null);
+    box.append(
+      row('视角人物', k.pov.length ? k.pov.join('、') : '没标出：章纲里写「视角：某某」可以指定'),
+      row('读者已知', k.known.length ? `${k.known.length} 条秘密已经揭开` : '还没有揭开过的秘密'),
+      row('本章投放', k.delivery ? h('div', { class: 'pre small' }, k.delivery) : '本章没有安排'),
+      row('禁区', lines(k.forbidden)),
+      row('人物知情', lines(k.people)),
+      row('新名词预算', k.budget ? `本章新出现的专有名词最多 ${k.budget} 个` : null));
+  }).catch(() => { box.innerHTML = ''; });
+  return box;
 }
 
 // ---------------- 角色对话 ----------------

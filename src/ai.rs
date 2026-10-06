@@ -1,10 +1,10 @@
 //! AI 任务：根据任务类型组装上下文和提示词，流式（SSE）或一次性（JSON）返回结果。
 
-use crate::api::{bad_request, content_hash, load_book_data, mark_early_terms, not_found, upstream, ApiResult, AppError};
+use crate::api::{bad_request, content_hash, load_book_data, mark_early_terms, mark_outline_contract, not_found, upstream, ApiResult, AppError};
 use crate::db::AiLog;
 use crate::library;
 use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmClient, LlmEvent, Message, Usage, CANCELLED};
-use crate::memory::{compose, match_entries, plan_text, render, render_entry, secret_ledger, BookData, ComposeOpts};
+use crate::memory::{compose, match_entries, plan_lines, plan_text, render, render_entry, schedule_lines, secret_ledger, BookData, ComposeOpts};
 use crate::models::{Book, Chapter, Entry, Provider, Role, Settings};
 use crate::prompts::{self, golden_hint, instruction_block, render_id, titled, titled_block, Brief};
 use crate::skills::{self, Skill};
@@ -469,6 +469,7 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                 let vol = req.volume_id.and_then(|id| d.volumes.iter().find(|x| x.id == id)).ok_or_else(|| not_found("卷"))?;
                 v.insert("volume_title", vol.title.clone());
                 v.insert("existing_block", titled_block("已有的卷纲草稿（在此基础上完善）", &d.volume_outline_at(vol, None), 2000));
+                v.insert("reveals_block", titled_block("揭示计划（作者层：按计划安排揭开点，还没到时间的不要写破）", &plan_lines(d).join("\n"), 5000));
             }
             let json = matches!(task, "ideas" | "characters");
             Ok(prepared(Role::Writer, editor_system(&b.genre, ov), &format!("task.{task}"), &v, json))
@@ -494,11 +495,14 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let end = start + count - 1;
             let mut v = Vars::new();
             v.insert("context", ctx);
             v.insert("recent_block", titled_block("最近几章", &recent, 3000));
+            v.insert("schedule_block", titled_block("这几章的信息投放（按揭示计划）", &schedule_lines(d, start, end).join("\n"), 4000));
+            v.insert("opening_block", prompts::opening_plan(start, end));
             v.insert("start", start.to_string());
-            v.insert("end", (start + count - 1).to_string());
+            v.insert("end", end.to_string());
             v.insert("count", count.to_string());
             v.insert("instruction_block", instruction_block(&req.instruction, "作者的要求"));
             Ok(prepared(Role::Writer, editor_system(&d.book.genre, ov), "task.chapter_outlines", &v, true))
@@ -1235,6 +1239,11 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
         if req.task == "reveal_plan" {
             if let Some(bid) = req.book_id {
                 mark_early_terms(&load_book_data(&st.db, bid)?, &mut value);
+            }
+        }
+        if req.task == "chapter_outlines" {
+            if let Some(bid) = req.book_id {
+                mark_outline_contract(&load_book_data(&st.db, bid)?, &mut value);
             }
         }
         if req.task == "logic_check" {

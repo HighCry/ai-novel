@@ -299,15 +299,22 @@ const VOLUME_OUTLINE: &str = "{{brief}}
 3. 本卷新登场的重要人物
 4. 需要埋下和回收的伏笔
 5. 本卷的高潮和结尾钩子
-{{existing_block}}";
+6. 有【揭示计划】时按计划安排本卷的揭开点：计划在本卷章节里揭开的秘密，写明在哪个事件里揭开；还没到时候的只埋种子、给线索，不写破
+{{existing_block}}
+{{reveals_block}}";
 
 const CHAPTER_OUTLINES: &str = "{{context}}
 
 {{recent_block}}
 
+{{schedule_block}}
+
+{{opening_block}}
+
 请接着规划第 {{start}} 章到第 {{end}} 章的章纲，共 {{count}} 章。{{instruction_block}}
-要求：每章都有明确的事件和推进；按爽点密度安排节奏：每章至少一个爽点或同等兑现（过渡章可以弱一些），每 5 章至少一个组合爽点，每 10～15 章一个改变主角地位的里程碑；章末尽量留钩子；和已有剧情、未回收的伏笔衔接。只输出 JSON，格式：
-{\"chapters\":[{\"title\":\"章节标题（不带“第几章”）\",\"outline\":\"本章章纲：主要事件、冲突、出场人物、爽点、结尾钩子，80-150字\"}]}";
+要求：每章都有明确的事件和推进；按爽点密度安排节奏：每章至少一个爽点或同等兑现（过渡章可以弱一些），每 5 章至少一个组合爽点，每 10～15 章一个改变主角地位的里程碑；章末尽量留钩子；和已有剧情、未回收的伏笔衔接。
+每章再写一份「合同」：reveals 逐条列出本章按【这几章的信息投放】要埋的种子、要给的线索、要揭开的秘密，并把它们写进 outline 的事件里——种子和线索只写读者看得到的异常、物件、传闻、对话，不写答案；没排到这一章的秘密一律不写破。hook 写章末留给读者的未决问题。new_terms 列出本章首次出现的专有名词（地名、组织、功法、境界、物品、称号），前 10 章不要超过【开篇要求】里的数量。只输出 JSON，格式：
+{\"chapters\":[{\"title\":\"章节标题（不带“第几章”）\",\"outline\":\"本章章纲：主要事件、冲突、出场人物、爽点，80-150字\",\"reveals\":[\"埋种子「秘密标题」：在正文里怎么露\"],\"hook\":\"章末未决问题\",\"new_terms\":[\"本章首次出现的专有名词\"]}]}";
 
 const SUMMARIZE: &str = "请为下面这一章写剧情摘要，供后续写作时回顾前情使用。
 要求：200-350 字；按时间顺序写清发生了什么、谁做了什么、结果如何；写明人物状态和关系的变化、新出现的人物/物品/设定、埋下或回收的伏笔；不评价，不修辞，直接输出摘要。
@@ -700,16 +707,25 @@ pub const TEMPLATES: &[Template] = &[
         id: "task.volume_outline",
         name: "卷纲",
         group: "开书",
-        description: "细化某一卷的卷纲",
-        vars: &[V_BRIEF, ("volume_title", "卷名"), ("existing_block", "已有的卷纲草稿")],
+        description: "细化某一卷的卷纲，有揭示计划时按计划安排本卷的揭开点",
+        vars: &[V_BRIEF, ("volume_title", "卷名"), ("existing_block", "已有的卷纲草稿"), ("reveals_block", "揭示计划（作者层）")],
         text: VOLUME_OUTLINE,
     },
     Template {
         id: "task.chapter_outlines",
         name: "章纲规划",
         group: "规划",
-        description: "接着最后一章规划后续章纲",
-        vars: &[V_CONTEXT, ("recent_block", "最近几章的摘要或章纲"), ("start", "起始章号"), ("end", "结束章号"), ("count", "章数"), V_INSTRUCTION],
+        description: "接着最后一章规划后续章纲，按揭示计划逐章安排投放，每章附合同（投放、章末悬念、新名词）",
+        vars: &[
+            V_CONTEXT,
+            ("recent_block", "最近几章的摘要或章纲"),
+            ("schedule_block", "这几章的信息投放：按揭示计划每章要埋的种子、给的线索、揭开的秘密"),
+            ("opening_block", "开篇要求：前 30 章的里程碑和前 10 章的新名词预算"),
+            ("start", "起始章号"),
+            ("end", "结束章号"),
+            ("count", "章数"),
+            V_INSTRUCTION,
+        ],
         text: CHAPTER_OUTLINES,
     },
     Template { id: "task.summarize", name: "章节摘要", group: "分析", description: "定稿时生成本章摘要", vars: &[V_CHAPTER, V_CONTENT], text: SUMMARIZE },
@@ -895,10 +911,34 @@ pub fn instruction_block(instruction: &str, label: &str) -> String {
 pub fn golden_hint(n: Option<i64>) -> &'static str {
     match n {
         Some(1) => "这是开篇第一章：前三百字内让主角登场并卷入冲突，尽早亮出核心卖点或金手指；金手指先写能干什么、要付什么代价，来历和分级以后再说。世界观只写主角此刻碰得到的部分，在冲突里带出来，不要大段交代；新名词最多三个，每个都绑在动作或后果上；不写境界大全、地图介绍、势力图谱。",
-        Some(2) => "这是第二章：在第一章冲突的基础上让主角做出第一次有效行动或反击，给出一个小爽点，同时抛出更大的悬念。",
-        Some(3) => "这是第三章：完成第一个小高潮，明确主角的目标和接下来的主线方向，章末留强钩子。",
+        Some(2) => "这是第二章：在第一章冲突的基础上让主角做出第一次有效行动或反击，给出一个小爽点，同时抛出更大的悬念。新出现的专有名词最多五个，每个都绑在动作或后果上。",
+        Some(3) => "这是第三章：完成第一个小高潮，明确主角的目标和接下来的主线方向，章末留强钩子。新出现的专有名词最多五个，每个都绑在动作或后果上。",
+        Some(4..=10) => "这是前十章：新出现的专有名词（地名、组织、功法、境界、物品）最多七个，每个都绑在动作或后果上，不写大段设定说明。",
         _ => "",
     }
+}
+
+/// 章纲规划覆盖到前 30 章时的开篇要求：里程碑（改编自 webnovel-handbook，MIT）和前 10 章的新名词预算。
+pub fn opening_plan(from: i64, to: i64) -> String {
+    if from > 30 {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    if from <= 10 {
+        lines.push(format!(
+            "新名词预算：第 1 章最多 {} 个，第 2～3 章每章最多 {} 个，第 4～10 章每章最多 {} 个；第 1 章只放当场必懂的设定。",
+            crate::logic::new_term_limit(Some(1)),
+            crate::logic::new_term_limit(Some(2)),
+            crate::logic::new_term_limit(Some(4))
+        ));
+    }
+    let milestones = [
+        (3, 6, "第 3～6 章：让读者看懂并验证一次核心规则（金手指或力量体系怎么用、要付什么代价）"),
+        (1, 10, "第 10 章前：至少一次设定回收——前面出现过的规则、物品、禁忌变成爽点或危机的解法"),
+        (1, 30, "第 30 章前：设定引擎成型，读者心里有数主角靠什么成长、往哪里走"),
+    ];
+    lines.extend(milestones.iter().filter(|(a, b, _)| from <= *b && to >= *a).map(|(_, _, m)| m.to_string()));
+    if lines.is_empty() { String::new() } else { format!("【开篇要求】\n{}", lines.join("\n")) }
 }
 
 #[derive(Default)]

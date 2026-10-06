@@ -3,7 +3,7 @@ import { store, emit, reload, chapterLabel } from './store.js';
 import { h, toast, modal, field, busy, confirmBox, copyText, download, fmtTime, fmtWords, readFile, pickFile, KIND, CHAR_FIELDS, ROLES, renderMarkdown, cleanAi, countWords, pushLayer } from './ui.js';
 import { GENRES } from './wizard.js';
 import { openLibrary, openSaveToLibrary } from './stylelib.js';
-import { openReveals, progressionEditor, revealReview, knowledgeReview, logicIssues } from './reveals.js';
+import { openReveals, progressionEditor, revealReview, knowledgeReview, logicIssues, outlineContract, outlineText } from './reveals.js';
 import { openTimeline } from './timeline.js';
 import { openTeardown } from './teardown.js';
 import { openTrends } from './trends.js';
@@ -785,12 +785,15 @@ export function openPlanner() {
   const list = h('div', { class: 'outline-list' });
   const draw = () => {
     list.innerHTML = '';
-    if (!planned.length) list.append(h('div', { class: 'empty' }, 'AI 会参考总纲、卷纲、前情和未回收的伏笔，接着最后一章往下规划。'));
+    if (!planned.length) list.append(h('div', { class: 'empty' }, 'AI 会参考总纲、卷纲、前情、未回收的伏笔和揭示计划，接着最后一章往下规划；每章附一份合同：本章投放、章末悬念、新名词。'));
+    const flagged = planned.filter((p) => (p.warnings || []).length).length;
+    if (flagged) list.append(h('p', { class: 'hint warn-text' }, `${flagged} 章和揭示计划对不上（提前写破、漏了计划里的投放、新名词太多），看黄色提示，改好章纲再添加。`));
     planned.forEach((p) => list.append(h('div', { class: 'outline-item' },
       h('input', { type: 'checkbox', checked: p.checked, onchange: (e) => { p.checked = e.target.checked; } }),
       h('div', { class: 'grow' },
         h('input', { value: p.title, oninput: (e) => { p.title = e.target.value; } }),
-        h('textarea', { rows: 2, value: p.outline, oninput: (e) => { p.outline = e.target.value; } })))));
+        h('textarea', { rows: 2, value: p.outline, oninput: (e) => { p.outline = e.target.value; } }),
+        outlineContract(p)))));
   };
   const genBtn = h('button', {
     class: 'btn primary',
@@ -832,7 +835,7 @@ export function openPlanner() {
           if (!chosen.length) return toast('没有选中的章纲', 'warn');
           let firstId = null;
           for (const p of chosen) {
-            const ch = await api.post(`/books/${store.book.id}/chapters`, { title: p.title, outline: p.outline, volume_id: o.volume_id ? Number(o.volume_id) : null });
+            const ch = await api.post(`/books/${store.book.id}/chapters`, { title: p.title, outline: outlineText(p), volume_id: o.volume_id ? Number(o.volume_id) : null });
             firstId = firstId || ch.id;
           }
           await reload(['chapters']);

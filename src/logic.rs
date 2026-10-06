@@ -16,6 +16,7 @@ pub fn check(d: &BookData) -> Vec<Finding> {
     leaks(d, &mut out);
     reveals(d, &mut out);
     opening(d, &mut out);
+    payoff_milestone(d, &mut out);
     new_terms(d, &mut out);
     exposition(d, &mut out);
     realms(d, &mut out);
@@ -224,8 +225,8 @@ fn noun_entries(d: &BookData) -> Vec<&Entry> {
     d.entries.iter().filter(|e| e.kind != "character" && !e.name.contains('的') && e.name.chars().count() <= 10).collect()
 }
 
-/// 每章首次出现的设定名词上限：第 1 章三个（webnovel-handbook），之后逐步放宽。
-fn new_term_limit(n: Option<i64>) -> usize {
+/// 每章首次出现的设定名词上限：第 1 章三个（webnovel-handbook），之后逐步放宽。规划前 10 章时也按这个给信息预算。
+pub fn new_term_limit(n: Option<i64>) -> usize {
     match n.unwrap_or(1) {
         ..=1 => 3,
         2..=3 => 5,
@@ -265,6 +266,21 @@ fn new_terms(d: &BookData, out: &mut Vec<Finding>) {
             out.push(f);
         }
     }
+}
+
+/// 开篇里程碑（webnovel-handbook）：第 10 章前至少回收一次设定。拿伏笔回收当依据：
+/// 前 10 章都写完了，却没有一条伏笔是在这 10 章里回收的，就提醒一次。
+fn payoff_milestone(d: &BookData, out: &mut Vec<Finding>) {
+    let first_ten: Vec<i64> = d.chapters.iter().filter(|c| d.number(c).is_some_and(|n| n <= 10)).map(|c| c.id).collect();
+    let all_written = first_ten.len() == 10 && first_ten.iter().all(|id| d.chapter(*id).is_some_and(|c| !c.content.trim().is_empty()));
+    if !all_written || d.threads.iter().any(|t| t.resolved_chapter_id.is_some_and(|id| first_ten.contains(&id))) {
+        return;
+    }
+    out.push(finding(
+        "info",
+        "开篇里程碑",
+        "前 10 章还没有回收过任何伏笔：前面出现过的规则、物品、禁忌，最好在第 10 章前变成一次爽点或危机的解法，读者才会相信这套设定有用".into(),
+    ));
 }
 
 // ---------- 开篇 ----------
@@ -607,6 +623,17 @@ mod tests {
 
     fn kinds(found: &[Finding]) -> Vec<&str> {
         found.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    #[test]
+    fn payoff_milestone_needs_a_resolved_thread_in_first_ten() {
+        let milestone = |d: &BookData| check(d).into_iter().filter(|f| f.kind == "开篇里程碑").count();
+        let mut d = book((1..=9).map(|i| ch(i, "陈渊挖矿。")).collect(), vec![], vec![]);
+        assert_eq!(milestone(&d), 0, "前 10 章没写完不提醒");
+        d = book((1..=10).map(|i| ch(i, "陈渊挖矿。")).collect(), vec![], vec![]);
+        assert_eq!(milestone(&d), 1);
+        d.threads = vec![Thread { id: 1, title: "草偶的用法".into(), status: "resolved".into(), planted_chapter_id: Some(2), resolved_chapter_id: Some(8), ..Default::default() }];
+        assert_eq!(milestone(&d), 0, "第 8 章回收过伏笔就不提醒");
     }
 
     #[test]

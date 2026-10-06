@@ -371,8 +371,50 @@ pub fn plan_text(r: &Reveal) -> String {
         .join("、")
 }
 
+/// 章纲规划用的逐章投放安排：第 from 到第 to 章里，按揭示计划每章要埋的种子、要给的线索、要揭开的秘密；
+/// 已经揭开过的秘密不再排。最后一行列出这几章都不能写破的秘密和泄露词。
+pub fn schedule_lines(data: &BookData, from: i64, to: i64) -> Vec<String> {
+    let open: Vec<&Reveal> = data.active_reveals().filter(|r| !data.revealed_before(r, None)).collect();
+    let note = |s: &str| if s.trim().is_empty() { String::new() } else { format!("（{}）", clip(s, 60)) };
+    let mut out: Vec<String> = (from..=to)
+        .filter_map(|n| {
+            let items: Vec<String> = open
+                .iter()
+                .flat_map(|r| {
+                    let t = r.title.trim();
+                    if r.reveal_at == Some(n) {
+                        let truth = if r.truth.trim().is_empty() { String::new() } else { format!("：{}", clip(&r.truth, 80)) };
+                        return vec![format!("揭开「{t}」{truth}")];
+                    }
+                    let mut v = Vec::new();
+                    if r.seed_at == Some(n) {
+                        v.push(format!("埋种子「{t}」{}", note(&r.seed_note)));
+                    }
+                    if r.clue_at == Some(n) {
+                        v.push(format!("给线索「{t}」{}", note(&r.clue_note)));
+                    }
+                    v
+                })
+                .collect();
+            (!items.is_empty()).then(|| format!("第{n}章：{}", items.join("；")))
+        })
+        .collect();
+    let hold: Vec<String> = open
+        .iter()
+        .filter(|r| r.reveal_at.map_or(true, |x| x > to))
+        .map(|r| {
+            let terms = r.term_list();
+            if terms.is_empty() { format!("「{}」", r.title.trim()) } else { format!("「{}」（不写{}）", r.title.trim(), terms.join("、")) }
+        })
+        .collect();
+    if !hold.is_empty() {
+        out.push(format!("这几章都还不能写破：{}", hold.join("、")));
+    }
+    out
+}
+
 /// 读者已经知道的秘密：本章之前揭开的，给出真相。
-fn reader_known(data: &BookData, cur: &Chapter) -> Vec<String> {
+pub fn reader_known(data: &BookData, cur: &Chapter) -> Vec<String> {
     data.active_reveals()
         .filter_map(|r| {
             let at = data.reveal_events_before(r, Some(cur)).into_iter().find(|e| e.step == "reveal")?;
@@ -384,7 +426,7 @@ fn reader_known(data: &BookData, cur: &Chapter) -> Vec<String> {
 }
 
 /// 本章投放清单：按揭示计划，本章要揭开、要埋的种子、要给的线索，以及近期会用到、可以先挂钩子的秘密。
-fn delivery(data: &BookData, cur: &Chapter) -> String {
+pub fn delivery(data: &BookData, cur: &Chapter) -> String {
     let Some(n) = data.number(cur) else { return String::new() };
     let (mut reveal, mut seed, mut clue, mut soon) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for r in data.active_reveals().filter(|r| !data.revealed_before(r, Some(cur))) {
@@ -424,7 +466,7 @@ fn delivery(data: &BookData, cur: &Chapter) -> String {
 }
 
 /// 禁区：写到这一章还没揭开、本章也不揭开的秘密，只给话题和泄露词，不给真相。
-fn forbidden(data: &BookData, cur: &Chapter) -> Vec<String> {
+pub fn forbidden(data: &BookData, cur: &Chapter) -> Vec<String> {
     let n = data.number(cur);
     data.active_reveals()
         .filter(|r| !data.revealed_before(r, Some(cur)) && (n.is_none() || r.reveal_at != n))
@@ -553,7 +595,7 @@ pub fn secret_ledger(data: &BookData, cur: &Chapter) -> Vec<String> {
 }
 
 /// 规划用的揭示计划：作者层，带真相、表面误读、三步计划和进度。
-fn plan_lines(data: &BookData) -> Vec<String> {
+pub fn plan_lines(data: &BookData) -> Vec<String> {
     data.active_reveals()
         .map(|r| {
             let mut line = format!("· 「{}」", r.title.trim());
@@ -1230,6 +1272,29 @@ mod tests {
         assert!(lines[2].contains("（好奇；读者第1章已经知道）") && lines[2].ends_with("写本章之前知情：林凡（本来就知道）"), "{}", lines[2]);
         let later = secret_ledger(&data, data.chapter(4).unwrap());
         assert!(later[1].ends_with("写本章之前知情：苏雨（本来就知道）、林凡误会（第2章，被告知）"), "{}", later[1]);
+    }
+
+    #[test]
+    fn schedule_lists_planned_steps_per_chapter() {
+        let mut data = sample();
+        data.reveals = vec![
+            Reveal { seed_at: Some(5), seed_note: "城墙上有同样的符文".into(), clue_at: Some(7), reveal_at: Some(40), ..reveal(1, "玉佩的来历", "玉佩是上古仙帝的残魂所化", "仙帝残魂") },
+            Reveal { seed_at: Some(2), reveal_at: Some(6), ..reveal(2, "苏雨的身份", "苏雨是魔教圣女", "魔教圣女") },
+            Reveal { reveal_at: Some(5), ..reveal(3, "拍卖会的东家", "拍卖会是林家的产业", "") },
+        ];
+        data.reveal_events = vec![RevealEvent { id: 1, reveal_id: 3, chapter_id: 2, step: "reveal".into(), ..Default::default() }];
+        let lines = schedule_lines(&data, 5, 7);
+        assert_eq!(
+            lines,
+            vec![
+                "第5章：埋种子「玉佩的来历」（城墙上有同样的符文）".to_string(),
+                "第6章：揭开「苏雨的身份」：苏雨是魔教圣女".to_string(),
+                "第7章：给线索「玉佩的来历」".to_string(),
+                "这几章都还不能写破：「玉佩的来历」（不写仙帝残魂）".to_string(),
+            ],
+            "已经揭开的「拍卖会的东家」不再排"
+        );
+        assert!(schedule_lines(&sample(), 1, 10).is_empty(), "没有揭示计划时什么都不排");
     }
 
     #[test]

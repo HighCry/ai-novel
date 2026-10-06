@@ -511,6 +511,22 @@ export function revealReview(ext, plan) {
   return { el, picked: () => ({ reveals: steps.filter((s) => s.checked), reveals_new: fresh.filter((s) => s.checked) }) };
 }
 
+// ---------------- 章纲合同 ----------------
+
+/** 章纲规划结果里一章的合同：章末悬念（可改）、本章投放、新名词，以及按揭示计划核对出来的问题 */
+export function outlineContract(p) {
+  const reveals = (p.reveals || []).filter(Boolean);
+  const terms = (p.new_terms || []).filter(Boolean);
+  return h('div', { class: 'plan-contract' },
+    h('input', { value: p.hook || '', placeholder: '章末留给读者的未决问题（会写进章纲）', oninput: (e) => { p.hook = e.target.value; } }),
+    reveals.length ? h('div', { class: 'small' }, '本章投放：', reveals.join('；')) : null,
+    terms.length ? h('div', { class: 'small muted' }, `新名词 ${terms.length} 个：${terms.join('、')}`) : null,
+    (p.warnings || []).length ? h('div', { class: 'out-warn' }, p.warnings.join('；')) : null);
+}
+
+/** 采纳章纲时把章末悬念接在后面，写正文时 AI 能看到 */
+export const outlineText = (p) => [String(p.outline || '').trim(), String(p.hook || '').trim() ? `章末：${String(p.hook).trim()}` : ''].filter(Boolean).join('\n');
+
 // ---------------- 逻辑审校结果 ----------------
 
 const LOGIC_TIP = { 超前揭示: '还没到揭开的时候被写破', 角色越知: '人物知道了他这时还不知道的事', 视角越权: '旁白替视角人物说出了他不知道的', 因果缺口: '行动依赖还没交代的信息或资源', 状态矛盾: '和设定、前情里的状态对不上' };

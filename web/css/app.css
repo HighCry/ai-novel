@@ -194,6 +194,11 @@ button:disabled { opacity: .55; cursor: wait; }
 .know-form .row { gap: 6px; align-items: center; flex-wrap: wrap; }
 .logic-rewrite { margin-top: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .logic-rewrite span { color: var(--green); }
+.plan-contract { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.contract-card { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 13px; }
+.contract-row { display: grid; grid-template-columns: 5.5em 1fr; gap: 6px; align-items: start; }
+.contract-row b { color: var(--muted); font-weight: normal; }
+.contract-row .pre { white-space: pre-wrap; line-height: 1.6; }
 .prog-box { margin: 6px 0 10px; }
 .prog-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .prog-row select { width: auto; }

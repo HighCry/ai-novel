@@ -17,7 +17,7 @@ const SUMMARY: &str = "林凡发现字条，决定当晚夜探藏经阁。";
 const UNIVERSAL_JSON: &str = r#"{
  "ideas":[{"title":"都市之神级系统","logline":"外卖员获得系统","selling_points":"反差","opening":"送餐途中"}],
  "characters":[{"name":"林凡","aliases":"凡哥","role":"主角","description":"少年","immutable":"重情义","state":"山村"}],
- "chapters":[{"title":"夜探","outline":"林凡夜探藏经阁"},{"title":"对峙","outline":"与黑袍人对峙"}],
+ "chapters":[{"title":"夜探","outline":"林凡夜探藏经阁","hook":"藏经阁里的人是谁","new_terms":["藏经阁","青云宗","玄铁令","天机阁"]},{"title":"对峙","outline":"与黑袍人对峙"}],
  "entries":[{"name":"林凡","kind":"character","is_new":false,"fields":{"power":"炼气四层","body":"左臂受伤","location":""}},{"name":"黑袍人","kind":"character","is_new":true,"description":"神秘刺客","state":"逃走"}],
  "threads_new":[{"title":"字条的笔迹","detail":"像是师父的字"}],
  "threads_progressed":[],
@@ -1171,6 +1171,51 @@ async fn knowledge_and_logic_check() {
     assert_eq!(find(&list, identity)["knows"].as_array().unwrap().len(), 1);
     let people4 = sections(&c.get(&format!("/api/books/{bid}/context?chapter_id={ch4}")).await, "人物知情（截至上一章）");
     assert!(!people4.contains("王奎的靠山"), "{people4}");
+}
+
+/// 叙事逻辑第四期：章纲规划按揭示计划逐章安排投放、生成后核对合同；卷纲带揭示计划；本章合同；前 10 章新名词预算
+#[tokio::test]
+async fn planning_follows_reveal_plan() {
+    let seen: Seen = Arc::default();
+    let mock = Router::new().route("/v1/models", get(mock_models)).route("/v1/chat/completions", post(mock_chat)).with_state(seen.clone());
+    let mock_addr = spawn(mock).await;
+    let addr = spawn(build_router(AppState::new(Db::open_in_memory().unwrap(), None))).await;
+    let c = Client { base: format!("http://{addr}"), http: reqwest::Client::new() };
+    let provider = json!({ "id": "mock", "name": "模拟接口", "base_url": format!("http://{mock_addr}/v1"), "api_key": API_KEY });
+    c.put("/api/settings", json!({ "providers": [provider], "writer": { "provider_id": "mock", "model": "mock-writer" }, "analyst": { "provider_id": "mock", "model": "mock-analyst" } })).await;
+    let bid = c.post("/api/books", json!({ "title": "剑来", "genre": "玄幻" })).await["id"].as_i64().unwrap();
+    let vol = c.post(&format!("/api/books/{bid}/volumes"), json!({ "title": "第一卷" })).await["id"].as_i64().unwrap();
+    c.post(&format!("/api/books/{bid}/reveals"), json!({ "title": "藏经阁的秘密", "truth": "藏经阁底下镇着魔头", "terms": "藏经阁", "reveal_at": 9 })).await;
+    c.post(&format!("/api/books/{bid}/reveals"), json!({ "title": "黑袍人的来历", "truth": "黑袍人是林凡的师兄", "terms": "师兄叛门", "seed_at": 2, "seed_note": "黑袍人用的是本门剑招", "reveal_at": 20 })).await;
+
+    // 章纲规划：逐章投放、不能写破的秘密、开篇要求都进提示词
+    let pv = c.post("/api/ai/preview", json!({ "task": "chapter_outlines", "book_id": bid, "count": 2 })).await;
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    for want in ["【这几章的信息投放（按揭示计划）】", "第2章：埋种子「黑袍人的来历」（黑袍人用的是本门剑招）", "这几章都还不能写破：「藏经阁的秘密」（不写藏经阁）", "【开篇要求】", "第 1 章最多 3 个", "第 10 章前", "\"hook\""] {
+        assert!(user.contains(want), "缺少「{want}」：{user}");
+    }
+    // 生成后核对合同：第1章写出了第9章才揭开的「藏经阁」、新名词超预算；第2章没安排计划里的种子
+    let r = c.post("/api/ai/json", json!({ "task": "chapter_outlines", "book_id": bid, "count": 2 })).await;
+    let w1 = r["chapters"][0]["warnings"].to_string();
+    assert!(w1.contains("提前写出了「藏经阁」（「藏经阁的秘密」计划第9章揭开）") && w1.contains("新出现 4 个名词（藏经阁、青云宗、玄铁令、天机阁），这一章建议不超过 3 个"), "{w1}");
+    let w2 = r["chapters"][1]["warnings"].to_string();
+    assert!(w2.contains("按计划这一章要埋种子「黑袍人的来历」，章纲里没安排"), "{w2}");
+
+    // 卷纲：带上揭示计划，按计划安排揭开点
+    let pv = c.post("/api/ai/preview", json!({ "task": "volume_outline", "book_id": bid, "volume_id": vol })).await;
+    let user = pv["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains("【揭示计划（作者层") && user.contains("真相：藏经阁底下镇着魔头") && user.contains("揭开点"), "{user}");
+
+    // 本章合同：按计划现算的投放清单和禁区，前 10 章给新名词预算
+    let new_chapter = |title: &str, outline: &str| json!({ "title": title, "outline": outline, "volume_id": vol });
+    c.post(&format!("/api/books/{bid}/chapters"), new_chapter("夜探", "林凡夜探")).await;
+    let ch2 = c.post(&format!("/api/books/{bid}/chapters"), new_chapter("对峙", "林凡与黑袍人对峙")).await["id"].as_i64().unwrap();
+    let k = c.get(&format!("/api/chapters/{ch2}/contract")).await;
+    assert_eq!((k["number"].as_i64(), k["budget"].as_i64(), k["has_plan"].as_bool()), (Some(2), Some(5), Some(true)));
+    assert!(k["delivery"].as_str().unwrap().contains("「黑袍人的来历」：黑袍人用的是本门剑招"), "{k}");
+    assert!(k["forbidden"].to_string().contains("「藏经阁的秘密」：不写「藏经阁」"), "{k}");
+    let pv = c.post("/api/ai/preview", json!({ "task": "write_chapter", "book_id": bid, "chapter_id": ch2 })).await;
+    assert!(pv["messages"][1]["content"].as_str().unwrap().contains("新出现的专有名词最多五个"));
 }
 
 /// 热梗、榜单、读者偏好：预先写好缓存，不碰外网

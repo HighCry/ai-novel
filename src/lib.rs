@@ -95,6 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/books/{id}/knowledge", post(create_knowledge))
         .route("/knowledge/{id}", patch(patch_knowledge).delete(delete_knowledge))
         .route("/chapters/{id}/logic", get(chapter_logic))
+        .route("/chapters/{id}/contract", get(chapter_contract))
         .route("/books/{id}/continuity", get(continuity))
         .route("/books/{id}/relations", get(list_relations).post(create_relation))
         .route("/relations/{id}", patch(patch_relation).delete(delete_relation))
