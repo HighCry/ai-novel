@@ -1,6 +1,7 @@
 import { api } from './api.js';
 import { store, chapterLabel } from './store.js';
 import { h, toast, icon, pushLayer } from './ui.js';
+import { leave } from './motion.js';
 
 const END = '。！？!?…';
 const CLOSE = '”’」』"）)';
@@ -177,7 +178,7 @@ export async function openReader() {
     stopTts();
     synth?.removeEventListener?.('voiceschanged', loadVoices);
     unlayer();
-    el.remove();
+    leave(el);
     document.removeEventListener('keydown', onKey);
   };
   const onKey = (e) => {

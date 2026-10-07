@@ -1,6 +1,7 @@
 import { api } from './api.js';
 import { store, on, scope, reload } from './store.js';
 import { toast, syncThemeColor, closeTopLayer } from './ui.js';
+import { leave, navigate } from './motion.js';
 import { renderShelf } from './shelf.js';
 import { renderEditor } from './editor.js';
 
@@ -53,12 +54,29 @@ async function leaveCurrent() {
   store.chapter = null;
 }
 
+let booted = false;
+
+/** 第一次进页面直接画，画好后启动页淡出；之后在书架和写作页之间切换都走过渡动画 */
+async function show(update, opts) {
+  if (booted) return navigate(update, opts);
+  booted = true;
+  try {
+    await update();
+  } finally {
+    leave(document.querySelector('.splash'));
+  }
+}
+
+/** 过渡时飞来飞去的书名：书架上是这本书书卡的标题，写作页上是顶栏的书名 */
+const heroTitle = (id) => () => document.querySelector(`.book-card[data-id="${id}"] h3`) || document.querySelector('.topbar .book-title');
+
 async function showShelf() {
   await leaveCurrent();
+  const id = store.book?.id;
   store.book = null;
   history.replaceState(null, '', '#/');
   document.title = 'AI 小说工坊';
-  renderShelf(root);
+  await show(() => renderShelf(root), { back: true, hero: heroTitle(id) });
 }
 
 async function openBook(id) {
@@ -69,7 +87,7 @@ async function openBook(id) {
     await reload();
     history.replaceState(null, '', `#/book/${id}`);
     document.title = `${store.book.title} - AI 小说工坊`;
-    renderEditor(root);
+    await show(() => renderEditor(root), { hero: heroTitle(id) });
   } catch (e) {
     toast(e.message, 'error');
     showShelf();

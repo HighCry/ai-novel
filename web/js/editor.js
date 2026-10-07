@@ -7,6 +7,7 @@ import { attachAssist, pref } from './assist.js';
 import { libraryButton } from './stylelib.js';
 import { openReader } from './reader.js';
 import { openTrends } from './trends.js';
+import { play } from './motion.js';
 
 let els = {};
 let dirty = false;
@@ -47,7 +48,7 @@ export function renderEditor(root) {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       openPalette();
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h' && !document.querySelector('.modal')) {
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h' && !document.querySelector('.overlay:not(.leaving) .modal')) {
       e.preventDefault();
       openReplace({ find: store.editor?.selection().text.trim() || '' });
     } else if (e.key === 'Escape' && layout.matches('.show-side, .show-panel')) {
@@ -258,6 +259,7 @@ async function openChapter(id) {
   try { await save(); } catch { return; }
   let ch;
   try { ch = await api.get(`/chapters/${id}`); } catch (e) { toast(e.message, 'error'); return; }
+  const turning = !!store.chapter && store.chapter.id !== id;
   store.chapter = ch;
   localStorage.setItem('lastChapter:' + store.book.id, id);
   els.empty.hidden = true;
@@ -280,6 +282,7 @@ async function openChapter(id) {
   updateSel();
   document.querySelectorAll('.ch-row').forEach((r) => r.classList.toggle('active', Number(r.dataset.id) === id));
   els.text.scrollTop = 0;
+  if (turning) play(els.wrap, 'turn');
   closeDrawers();
   assist?.refresh();
   emit('chapter-loaded', ch);

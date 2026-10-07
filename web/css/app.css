@@ -817,6 +817,135 @@ textarea.streaming, .out-text.streaming { animation: stream-glow 1.8s ease-in-ou
   .btn.primary:hover:not(:disabled) { box-shadow: 0 2px 8px rgba(179, 58, 43, .2); }
 }
 
+/* ---------- v0.6 动效：弹簧曲线、退场、页面过渡、换肤 ---------- */
+:root {
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in: cubic-bezier(.4, 0, 1, 1);
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+  --spring-soft: cubic-bezier(.22, 1.2, .36, 1);
+}
+/* 阻尼弹簧：spring 过冲约 8%，spring-soft 约 1.5%；不支持 linear() 时用上面的近似曲线 */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring: linear(0, 0.007 1.3%, 0.031 2.8%, 0.067 4.3%, 0.12 6%, 0.238 9%, 0.521 15.3%, 0.633 18%, 0.741 20.8%, 0.83 23.5%, 0.903 26.2%, 0.963 28.8%, 1.008 31.5%, 1.043 34.3%, 1.063 36.7%, 1.075 39%, 1.082 41.5%, 1.083 44.3%, 1.072 50%, 1.019 65.2%, 1.002 73.2%, 0.993 85.8%, 0.996 99.8%, 1);
+    --spring-soft: linear(0, 0.006 1.5%, 0.024 3.2%, 0.057 5%, 0.102 7%, 0.2 10.5%, 0.428 17.8%, 0.527 21.2%, 0.622 24.7%, 0.705 28.2%, 0.77 31.3%, 0.828 34.7%, 0.877 38.2%, 0.917 41.7%, 0.952 45.8%, 0.979 50.3%, 0.998 55.2%, 1.009 60.7%, 1.015 73.8%, 1.004 99.8%, 1);
+  }
+}
+
+/* 按下快、松开带回弹；键盘聚焦时朱砂描边从外往里收 */
+.btn, .ghost, .mini, .chip, .icon-btn, .tab, .seg-btn, .ch-row, .palette-item, .slash-item, .handbook-item, .prompt-item, .version-item, .lib-row, .entry-card, .idea-card, .name-pick, .format-item, .issue, .book-title {
+  transition: background-color .2s var(--ease), color .2s var(--ease), border-color .2s var(--ease), box-shadow .25s var(--ease), transform .45s var(--spring), opacity .2s;
+}
+.btn:active:not(:disabled), .mini:active:not(:disabled), .chip:active, .seg-btn:active { transform: scale(.96); transition-duration: .08s; }
+.icon-btn:active { transform: scale(.9); transition-duration: .08s; }
+:is(.btn, .ghost, .mini, .chip, .icon-btn, .seg-btn, .book-title):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; animation: focus-ink .35s var(--ease-out); }
+.ico { transition: transform .5s var(--spring); }
+.icon-btn:hover .ico-close { transform: rotate(90deg); }
+.logo { transition: transform .6s var(--spring); }
+
+/* 书卡：入场错开升起；有鼠标时跟着指针倾斜，封面像被抽出来一点 */
+.book-card { animation: rise .6s var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 55ms); }
+@media (hover: hover) and (pointer: fine) {
+  .book-card { transition: transform .7s var(--spring-soft), box-shadow .35s var(--ease-out), border-color .35s var(--ease-out); }
+  .book-card:hover { transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(-4px); transition-duration: .2s, .35s, .35s; }
+  .book-card::before { content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; pointer-events: none; opacity: 0; background: radial-gradient(circle at var(--mx, 50%) var(--my, 0%), rgba(255, 255, 255, .55), transparent 60%); mix-blend-mode: soft-light; transition: opacity .35s var(--ease-out); }
+  .book-card:hover::before { opacity: 1; }
+  .book-cover { transition: transform .6s var(--spring), box-shadow .35s var(--ease-out); }
+  .book-card:hover .book-cover { transform: translateY(-2px) rotate(-2.5deg) scale(1.05); box-shadow: 3px 8px 16px rgba(40, 20, 10, .22), inset 0 0 0 1px rgba(255, 255, 255, .12); }
+}
+
+/* 弹窗、命令面板、阅读页：进场带弹性，关掉时先退场再移除 */
+.overlay { animation: fade-in .24s var(--ease-out) backwards; }
+.modal { animation: modal-in .5s var(--spring-soft) backwards; }
+.overlay.leaving, .palette.leaving { animation: fade-out .2s var(--ease-in) forwards; pointer-events: none; }
+.overlay.leaving .modal, .palette.leaving .palette-box { animation: modal-out .18s var(--ease-in) forwards; }
+.palette { animation: fade-in .18s var(--ease-out) backwards; }
+.palette-box { animation: pop-in .4s var(--spring-soft) backwards; }
+.reader { animation: reader-in .42s var(--ease-out) backwards; }
+.reader.leaving { animation: reader-out .22s var(--ease-in) forwards; pointer-events: none; }
+
+/* 提示条：弹出来，消失时像墨洇进纸里 */
+.toast { animation: toast-pop .6s var(--spring) backwards; transition: opacity .26s var(--ease-in), transform .26s var(--ease-in), filter .26s var(--ease-in); }
+.toast::before { animation: stamp .55s .12s var(--spring) backwards; }
+.toast.hide { opacity: 0; transform: scale(.94); filter: blur(3px); }
+
+/* 标签下划线：切换时从旧标签滑过来，起点由 motion.js 写进 --ink-dx / --ink-sx */
+.tab { position: relative; }
+.tab.active { border-bottom-color: transparent; }
+.tab.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px; border-radius: 1px; background: var(--accent); transform-origin: 0 50%; }
+.tab.ink-slide::after { animation: tab-ink .5s var(--spring-soft); }
+
+/* 助手面板只在切换标签时让内容错开升起，数据刷新重画时不再整片重播 */
+.panel-body > * { animation: none; }
+.panel-body.swap > * { animation: rise .42s var(--ease-out) backwards; }
+.panel-body.swap > :nth-child(2) { animation-delay: 40ms; }
+.panel-body.swap > :nth-child(3) { animation-delay: 80ms; }
+.panel-body.swap > :nth-child(n+4) { animation-delay: 120ms; }
+
+/* 换章时正文像翻到新的一页；展开的折叠内容、刚勾上的勾选框也有反馈 */
+.text-wrap.turn { animation: page-turn .45s var(--ease-out); }
+details[open] > :not(summary) { animation: rise .32s var(--ease-out) backwards; }
+input.pop { animation: check-pop .45s var(--spring); }
+
+/* 启动页：加载超过 0.3 秒才盖章，快的时候不闪 */
+.splash { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: var(--bg) var(--grain); }
+.splash.leaving { animation: fade-out .4s var(--ease-out) forwards; }
+.splash-seal { position: relative; display: grid; place-items: center; width: 68px; height: 68px; border-radius: 16px; background: var(--accent); color: #fff; font: 38px/1 var(--font-title); transform: scale(1) rotate(-4deg); box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .26), 0 8px 22px rgba(179, 58, 43, .28); animation: seal-stamp .7s .3s var(--spring) backwards; }
+.splash-seal::after { content: ''; position: absolute; inset: -7px; border: 2px solid var(--accent); border-radius: 22px; opacity: 0; animation: ink-ring 1.8s 1s var(--ease-out) infinite; }
+.splash-name { color: var(--text); font: 17px/1.4 var(--font-title); letter-spacing: .3em; text-indent: .3em; animation: rise .6s .5s var(--ease-out) backwards; }
+.splash-hint { color: var(--muted); font-size: 12px; animation: fade-in .5s 1.6s backwards; }
+
+/* 页面过渡：进书时书架后退、写作页升起；回书架时写作页落下、书架回到眼前。书名单独飞过去 */
+.vt-forward::view-transition-old(root), .vt-forward::view-transition-new(root),
+.vt-back::view-transition-old(root), .vt-back::view-transition-new(root) { mix-blend-mode: normal; }
+.vt-forward::view-transition-old(root) { animation: vt-recede .5s var(--ease-out) both; }
+.vt-forward::view-transition-new(root) { animation: vt-arrive .46s var(--ease-out) both; }
+.vt-back::view-transition-old(root) { z-index: 1; animation: vt-dismiss .3s var(--ease-in) both; }
+.vt-back::view-transition-new(root) { animation: vt-return .5s var(--ease-out) both; }
+::view-transition-group(book-title) { animation-duration: .55s; animation-timing-function: var(--spring-soft); }
+::view-transition-old(book-title), ::view-transition-new(book-title) { width: auto; height: auto; top: 50%; translate: 0 -50%; animation-duration: .3s; }
+/* 换肤：旧配色不动，新配色由 motion.js 从按钮处圆形晕开 */
+.vt-theme::view-transition-old(root), .vt-theme::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+
+@media (max-width: 760px) {
+  /* 「⋯」菜单从按钮处展开，收起时先退场（靠 display 的离散过渡，不支持的浏览器直接消失） */
+  .top-actions {
+    position: absolute; top: calc(100% - 2px); right: 8px; z-index: 40; flex-direction: column; align-items: stretch; gap: 2px;
+    min-width: 172px; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-lg);
+    transform-origin: calc(100% - 20px) 0; opacity: 0; transform: translateY(-6px) scale(.95);
+    transition: opacity .16s var(--ease-in), transform .16s var(--ease-in), display .16s allow-discrete;
+  }
+  .top-actions.open { opacity: 1; transform: none; animation: menu-in .42s var(--spring-soft) backwards; }
+  .top-actions.open > * { animation: rise .34s var(--ease-out) backwards; }
+  .top-actions.open > :nth-child(2) { animation-delay: 20ms; }
+  .top-actions.open > :nth-child(3) { animation-delay: 40ms; }
+  .top-actions.open > :nth-child(4) { animation-delay: 60ms; }
+  .top-actions.open > :nth-child(n+5) { animation-delay: 80ms; }
+  .modal, .modal.wide, .modal.xl { animation: sheet-in .5s var(--ease-out) backwards; }
+  .overlay.leaving .modal { animation: sheet-out .24s var(--ease-in) forwards; }
+  .sidebar, .panel, .editor-layout.focus .sidebar, .editor-layout.focus .panel { transition: transform .26s var(--ease-in), visibility 0s linear .26s; }
+  .editor-layout.show-side .sidebar, .editor-layout.show-panel .panel { transition: transform .5s var(--ease-out), visibility 0s; }
+}
+
+@keyframes fade-out { to { opacity: 0; } }
+@keyframes modal-out { to { opacity: 0; transform: translateY(6px) scale(.97); } }
+@keyframes sheet-out { to { transform: translateY(100%); } }
+@keyframes reader-in { from { opacity: 0; transform: translateY(16px); } }
+@keyframes reader-out { to { opacity: 0; transform: translateY(16px); } }
+@keyframes toast-pop { from { opacity: 0; transform: translateY(18px) scale(.9); } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-8px) scale(.92); } }
+@keyframes tab-ink { from { transform: translateX(var(--ink-dx, 0px)) scaleX(var(--ink-sx, 1)); } }
+@keyframes page-turn { from { opacity: .35; transform: translateY(8px); } }
+@keyframes check-pop { from { transform: scale(.55); } }
+@keyframes focus-ink { from { outline-color: transparent; outline-offset: 6px; } }
+@keyframes seal-stamp { from { opacity: 0; transform: scale(2.1) rotate(-18deg); } 35% { opacity: 1; } }
+@keyframes ink-ring { from { opacity: .5; transform: scale(.92); } to { opacity: 0; transform: scale(1.5); } }
+@keyframes vt-recede { to { transform: scale(.97); } }
+@keyframes vt-arrive { from { opacity: 0; transform: translateY(18px); } }
+@keyframes vt-dismiss { to { opacity: 0; transform: translateY(24px); } }
+@keyframes vt-return { from { transform: scale(.97); } }
+
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0s !important; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }

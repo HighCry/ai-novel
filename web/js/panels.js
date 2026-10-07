@@ -4,6 +4,7 @@ import { h, toast, busy, cleanAi, copyText, countWords, KIND, keywords, diffClau
 import { openSettings, openEntry, openThread, openFinalize, openContext, openTavernImport, openVolume, openPreview, openRelations, openSkills } from './dialogs.js';
 import { openReveals, openRevealEditor, logicIssues } from './reveals.js';
 import { openTimeline } from './timeline.js';
+import { play } from './motion.js';
 
 const TABS = [['ai', 'AI 写作'], ['bible', '设定库'], ['threads', '伏笔'], ['check', '检查'], ['memory', '记忆'], ['chat', '对话']];
 const TASK_LABEL = { continue: '续写', write_chapter: '整章初稿', expand: '扩写', shorten: '缩写', rewrite: '改写', polish: '润色', deslop: '去 AI 味', proofread: '校对' };
@@ -41,10 +42,12 @@ export function renderPanels(el) {
 }
 
 function switchTab(id) {
+  const changed = id !== current;
   current = id;
   localStorage.setItem('panelTab', id);
   container?.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
   draw();
+  if (changed) play(container?.querySelector('.panel-body'), 'swap');
 }
 
 function draw() {

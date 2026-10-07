@@ -1,3 +1,5 @@
+import { leave, reflowOut, themeSwap } from './motion.js';
+
 /** 创建元素：h('div', { class, onclick, ... }, 子节点...) */
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -63,8 +65,11 @@ export function toast(msg, type = 'info', ms = 2800) {
   const el = h('div', { class: 'toast ' + type }, msg);
   document.getElementById('toasts').append(el);
   setTimeout(() => el.classList.add('hide'), ms);
-  setTimeout(() => el.remove(), ms + 400);
+  setTimeout(() => reflowOut(el), ms + 400);
 }
+
+/** 最上层的浮层：body 里最后一个没在退场的 div */
+const topLayer = () => [...document.body.children].filter((el) => el.tagName === 'DIV' && !el.classList.contains('leaving')).pop();
 
 /** 弹窗：actions = [{ label, class, onClick(close) }] */
 export function modal({ title, body, actions = [], wide = false, onClose } = {}) {
@@ -73,11 +78,11 @@ export function modal({ title, body, actions = [], wide = false, onClose } = {})
     if (closed) return;
     closed = true;
     unlayer();
-    overlay.remove();
+    leave(overlay);
     document.removeEventListener('keydown', onKey);
     onClose?.();
   };
-  const onKey = (e) => { if (e.key === 'Escape' && overlay === document.querySelector('.overlay:last-of-type')) close(); };
+  const onKey = (e) => { if (e.key === 'Escape' && overlay === topLayer()) close(); };
   const foot = h('div', { class: 'modal-foot' });
   const setActions = (list) => {
     foot.innerHTML = '';
@@ -245,13 +250,13 @@ export function themeButton() {
   const btn = h('button', {
     class: 'ghost',
     title: '切换深色/浅色主题',
-    onclick: () => {
+    onclick: () => themeSwap(() => {
       const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
       document.documentElement.dataset.theme = next;
       localStorage.setItem('theme', next);
       syncThemeColor();
       btn.textContent = icon();
-    },
+    }, btn),
   }, icon());
   return btn;
 }

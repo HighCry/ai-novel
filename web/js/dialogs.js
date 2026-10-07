@@ -7,6 +7,7 @@ import { openReveals, progressionEditor, revealReview, knowledgeReview, logicIss
 import { openTimeline } from './timeline.js';
 import { openTeardown } from './teardown.js';
 import { openTrends } from './trends.js';
+import { leave } from './motion.js';
 
 let genreProfiles = null;
 export async function loadGenres() {
@@ -1559,7 +1560,7 @@ function skillImport(done) {
 // ---------------- 命令面板（Ctrl+K） ----------------
 
 export function openPalette() {
-  if (document.querySelector('.palette')) return;
+  if (document.querySelector('.palette:not(.leaving)')) return;
   const commands = [
     ['续写（从光标处）', () => emit('ai-run', 'continue')],
     ['写整章', () => emit('ai-run', 'write_chapter')],
@@ -1595,7 +1596,7 @@ export function openPalette() {
   let filtered = items;
   let active = 0;
   const list = h('div', { class: 'palette-list' });
-  const close = () => { unlayer(); overlay.remove(); };
+  const close = () => { unlayer(); leave(overlay); };
   const pick = (it) => { close(); it.run(); };
   const draw = () => {
     list.innerHTML = '';
@@ -1903,7 +1904,7 @@ export function openImport() {
         class: 'primary',
         onClick: async (close) => {
           if (!file) return toast('先选择文件', 'warn');
-          const btn = document.querySelector('.modal-foot .primary');
+          const btn = document.querySelector('.overlay:not(.leaving) .modal-foot .primary');
           await busy(btn, async () => {
             const data = await readFile(file);
             const r = await api.post('/import/novel', { filename: file.name, data, title: o.title, genre: o.genre });

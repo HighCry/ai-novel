@@ -69,7 +69,7 @@ function bookCard(b, root) {
     toast('已删除');
     renderShelf(root);
   };
-  return h('div', { class: 'book-card', onclick: () => emit('open-book', b.id) },
+  return h('div', { class: 'book-card', dataset: { id: b.id }, onclick: () => emit('open-book', b.id) },
     h('div', { class: 'book-cover' }, (b.title || '书').slice(0, 1)),
     h('div', { class: 'book-info' },
       h('h3', null, b.title),

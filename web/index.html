@@ -12,9 +12,11 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/css/app.css">
+  <script>try { document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light'; } catch {}</script>
 </head>
 <body>
-  <div id="app"><div class="boot">正在加载……</div></div>
+  <div id="app"></div>
+  <div class="splash" role="status" aria-label="正在加载"><span class="splash-seal">墨</span><span class="splash-name">AI 小说工坊</span><span class="splash-hint">正在加载……</span></div>
   <div id="toasts"></div>
   <script type="module" src="/js/app.js"></script>
 </body>
