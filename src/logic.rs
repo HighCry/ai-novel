@@ -459,8 +459,8 @@ fn protagonist(d: &BookData) -> Option<&Entry> {
     people().find(|e| e.role == "主角").or_else(|| people().find(|e| e.always_include)).or_else(|| people().max_by_key(|e| mentions(e)))
 }
 
-/// 一个人物各章章末快照里的境界，按章节先后；初始状态排最前，章节记为 None。
-fn snapshot_levels<'a>(d: &'a BookData, e: &Entry, realms: &[String]) -> Vec<(Option<&'a Chapter>, Level, String)> {
+/// 一个人物的初始状态和各章章末快照，按章节先后；初始状态排最前，章节记为 None。
+fn end_snapshots<'a>(d: &'a BookData, e: &Entry) -> Vec<(Option<usize>, &'a EntryState)> {
     let mut snaps: Vec<(Option<usize>, &EntryState)> = d
         .states
         .iter()
@@ -472,6 +472,11 @@ fn snapshot_levels<'a>(d: &'a BookData, e: &Entry, realms: &[String]) -> Vec<(Op
         .collect();
     snaps.sort_by_key(|(p, s)| (p.map_or(-1, |p| p as i64), s.id));
     snaps
+}
+
+/// 一个人物各章章末快照里的境界，按章节先后；初始状态排最前，章节记为 None。
+fn snapshot_levels<'a>(d: &'a BookData, e: &Entry, realms: &[String]) -> Vec<(Option<&'a Chapter>, Level, String)> {
+    end_snapshots(d, e)
         .into_iter()
         .filter_map(|(p, s)| {
             let power = s.fields.get("power").cloned().unwrap_or_else(|| s.text());
@@ -592,13 +597,13 @@ fn used_in(text: &str, ks: &[String]) -> Option<String> {
 
 // ---------- 带有效区间的事实 ----------
 
-/// 一条带有效区间的事实（参考 FactTrack）：某人从第几章起是什么境界、某件物品从第几章起已经没了。
-/// 都从定稿时按章入账的快照推出来，到下一次变化为止一直有效。
+/// 一条带有效区间的事实（参考 FactTrack）：某人从第几章起是什么境界、在哪里、身体怎样，某件物品从第几章起已经没了，
+/// 两个人从第几章到第几章是什么关系。人物和物品从定稿时按章入账的快照推出来，到下一次变化为止一直有效；关系用关系表里的起止章节。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Fact {
     pub entry_id: i64,
     pub name: String,
-    /// realm 境界 / gone 物品没了
+    /// realm 境界 / place 位置 / body 身体 / gone 物品没了 / relation 关系
     pub kind: &'static str,
     pub value: String,
     /// 从第几章起；None 是开篇前
@@ -609,8 +614,24 @@ pub struct Fact {
     pos: Option<usize>,
 }
 
+/// 快照里表示「这一项没变」的写法，按没写处理
+const UNCHANGED: [&str; 6] = ["无变化", "没有变化", "未变化", "未变", "不变", "同上"];
+
+/// 一个人物各章快照里某一项的写法，按章节先后；没写这一项或写着「无变化」的快照跳过（定稿只填变了的项）。
+fn snapshot_field(d: &BookData, e: &Entry, key: &str) -> Vec<(Option<usize>, String)> {
+    end_snapshots(d, e)
+        .into_iter()
+        .filter_map(|(p, s)| {
+            let v = s.fields.get(key)?.split_whitespace().collect::<Vec<_>>().join(" ");
+            let bare = v.trim_end_matches(['。', '.', '，', ',']);
+            (!bare.is_empty() && !UNCHANGED.contains(&bare)).then_some((p, v))
+        })
+        .collect()
+}
+
 pub fn facts(d: &BookData) -> Vec<Fact> {
     let realms = realm_names(d);
+    let number = |p: Option<usize>| p.and_then(|p| d.number(&d.chapters[p]));
     let mut out = Vec::new();
     for e in d.entries.iter().filter(|e| e.kind == "character") {
         // 按解析出的境界和层数比，「炼体境四重」「炼体四重」算同一个
@@ -620,10 +641,21 @@ pub fn facts(d: &BookData) -> Vec<Fact> {
                 runs.push((c.and_then(|c| d.position(c.id)), txt, lv));
             }
         }
-        let number = |p: Option<usize>| p.and_then(|p| d.number(&d.chapters[p]));
         for (i, (pos, value, _)) in runs.iter().enumerate() {
             let to = runs.get(i + 1).and_then(|(p, _, _)| number(*p));
             out.push(Fact { entry_id: e.id, name: e.name.trim().to_string(), kind: "realm", value: value.clone(), from: number(*pos), to, pos: *pos });
+        }
+        for (key, kind) in [("location", "place"), ("body", "body")] {
+            let mut runs: Vec<(Option<usize>, String)> = Vec::new();
+            for (p, v) in snapshot_field(d, e, key) {
+                if runs.last().map_or(true, |(_, last)| *last != v) {
+                    runs.push((p, v));
+                }
+            }
+            for (i, (pos, value)) in runs.iter().enumerate() {
+                let to = runs.get(i + 1).and_then(|(p, _)| number(*p));
+                out.push(Fact { entry_id: e.id, name: e.name.trim().to_string(), kind, value: value.clone(), from: number(*pos), to, pos: *pos });
+            }
         }
     }
     for e in d.entries.iter().filter(|e| e.kind == "item") {
@@ -640,6 +672,17 @@ pub fn facts(d: &BookData) -> Vec<Fact> {
             }
         }
     }
+    for r in &d.relations {
+        let (Some(a), Some(b)) = (d.entry_name(r.a_id), d.entry_name(r.b_id)) else { continue };
+        let pos = r.since_chapter_id.and_then(|id| d.position(id));
+        let ended = r.status == "ended";
+        let to = if ended { number(r.until_chapter_id.and_then(|id| d.position(id))) } else { None };
+        let mut value = r.kind.trim().to_string();
+        if ended && to.is_none() {
+            value += "（已结束，没记结束章节）";
+        }
+        out.push(Fact { entry_id: r.a_id, name: format!("{} 与 {}", a.trim(), b.trim()), kind: "relation", value, from: number(pos), to, pos });
+    }
     out
 }
 
@@ -649,11 +692,21 @@ pub fn facts_at(d: &BookData, current: &Chapter, present: &[&Entry]) -> Vec<Stri
     let ids: HashSet<i64> = present.iter().map(|e| e.id).collect();
     let all = facts(d);
     let valid = |f: &&Fact| ids.contains(&f.entry_id) && f.pos.map_or(true, |p| p < cur);
+    let since = |f: &Fact| f.from.map_or_else(|| "开篇前".to_string(), |n| format!("第{n}章起"));
     let mut out = Vec::new();
     for e in present.iter().filter(|e| e.kind == "character") {
-        if let Some(f) = all.iter().filter(valid).filter(|f| f.entry_id == e.id && f.kind == "realm").last() {
-            let since = f.from.map_or_else(|| "开篇前".to_string(), |n| format!("第{n}章起"));
-            out.push(format!("· {}：{}（{since}）", f.name, f.value));
+        let latest = |kind: &str| all.iter().filter(valid).filter(|f| f.entry_id == e.id && f.kind == kind).last();
+        let mut parts = Vec::new();
+        if let Some(f) = latest("realm") {
+            parts.push(format!("{}（{}）", f.value, since(f)));
+        }
+        for (kind, label) in [("place", "位置"), ("body", "身体")] {
+            if let Some(f) = latest(kind) {
+                parts.push(format!("{label}：{}（{}）", clip(&f.value, 30), since(f)));
+            }
+        }
+        if !parts.is_empty() {
+            out.push(format!("· {}：{}", e.name.trim(), parts.join("；")));
         }
     }
     for f in all.iter().filter(valid).filter(|f| f.kind == "gone") {
@@ -740,6 +793,41 @@ mod tests {
         let at3 = facts_at(&d, d.chapter(3).unwrap(), &[&hero, &pill]);
         assert!(at3.iter().all(|l| !l.contains("毒灵髓")), "第3章里才用完的，写第3章时还在：{at3:?}");
         assert!(facts_at(&d, d.chapter(4).unwrap(), &[&hero]).iter().all(|l| !l.contains("毒灵髓")), "没出场的物品不提");
+    }
+
+    #[test]
+    fn place_body_and_relations_have_intervals() {
+        let hero = person(1, "陈渊");
+        let foe = person(2, "赵崇山");
+        let snap = |id, chapter: Option<i64>, fields: &[(&str, &str)]| EntryState {
+            id,
+            entry_id: 1,
+            chapter_id: chapter,
+            phase: "end".into(),
+            fields: fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+        };
+        let states = vec![
+            snap(1, None, &[("location", "黑灵矿第七矿段"), ("body", "气血枯竭")]),
+            snap(2, Some(2), &[("location", "黑灵矿第七矿段")]),
+            snap(3, Some(3), &[("location", "鬼市"), ("body", "左臂骨裂")]),
+            snap(4, Some(4), &[("body", "无变化")]),
+        ];
+        let mut d = book((1..=5).map(|i| ch(i, "陈渊挖矿。")).collect(), vec![hero.clone(), foe], states);
+        d.relations = vec![
+            crate::models::Relation { id: 1, a_id: 1, b_id: 2, kind: "敌对".into(), status: "active".into(), since_chapter_id: Some(2), ..Default::default() },
+            crate::models::Relation { id: 2, a_id: 2, b_id: 1, kind: "上下级".into(), status: "ended".into(), ..Default::default() },
+        ];
+        let of = |kind: &str| -> Vec<(String, Option<i64>, Option<i64>)> { facts(&d).iter().filter(|f| f.kind == kind).map(|f| (f.value.clone(), f.from, f.to)).collect() };
+        assert_eq!(of("place"), vec![("黑灵矿第七矿段".into(), None, Some(3)), ("鬼市".into(), Some(3), None)], "位置没变的快照不切区间");
+        assert_eq!(of("body"), vec![("气血枯竭".into(), None, Some(3)), ("左臂骨裂".into(), Some(3), None)], "写着无变化的快照按没写处理");
+        assert_eq!(of("relation"), vec![("敌对".into(), Some(2), None), ("上下级（已结束，没记结束章节）".into(), None, None)]);
+        assert_eq!(facts_at(&d, d.chapter(5).unwrap(), &[&hero]), vec!["· 陈渊：位置：鬼市（第3章起）；身体：左臂骨裂（第3章起）".to_string()]);
+        assert_eq!(
+            facts_at(&d, d.chapter(3).unwrap(), &[&hero]),
+            vec!["· 陈渊：位置：黑灵矿第七矿段（开篇前）；身体：气血枯竭（开篇前）".to_string()],
+            "第3章里才变的，写第3章时还是旧的"
+        );
     }
 
     #[test]

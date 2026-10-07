@@ -882,7 +882,7 @@ pub async fn chapter_contract(State(st): State<AppState>, Path(id): Path<i64>) -
     })))
 }
 
-/// 境界和物品的有效区间：某人从第几章起是什么境界、到第几章被取代，某件物品从第几章起已经没了。
+/// 带有效区间的事实：某人从第几章起是什么境界、在哪里、身体怎样，到第几章被取代；某件物品从第几章起已经没了；两人从第几章到第几章是什么关系。
 pub async fn book_facts(State(st): State<AppState>, Path(book_id): Path<i64>) -> ApiResult<Vec<crate::logic::Fact>> {
     Ok(Json(crate::logic::facts(&load_book_data(&st.db, book_id)?)))
 }

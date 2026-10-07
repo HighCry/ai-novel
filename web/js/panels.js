@@ -715,7 +715,7 @@ function contractCard(ch) {
       row('本章投放', k.delivery ? h('div', { class: 'pre small' }, k.delivery) : '本章没有安排'),
       row('禁区', lines(k.forbidden)),
       row('人物知情', lines(k.people)),
-      row('境界和物品', lines(k.facts || [])),
+      row('境界、位置、身体和物品', lines(k.facts || [])),
       row('新名词预算', k.budget ? `本章新出现的专有名词最多 ${k.budget} 个` : null));
   }).catch(() => { box.innerHTML = ''; });
   return box;

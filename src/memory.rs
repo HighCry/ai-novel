@@ -883,7 +883,7 @@ pub fn compose(data: &BookData, o: &ComposeOpts) -> Vec<Section> {
         if let Some(cur) = o.current {
             let facts = crate::logic::facts_at(data, cur, &matched);
             if !facts.is_empty() {
-                out.push(Section { title: "境界和物品（截至上一章，按章入账）".into(), body: take_within(facts, b * 4 / 100) });
+                out.push(Section { title: "境界、位置、身体和物品（截至上一章，按章入账）".into(), body: take_within(facts, b * 4 / 100) });
             }
         }
     }
