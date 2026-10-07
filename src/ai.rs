@@ -1,6 +1,6 @@
 //! AI 任务：根据任务类型组装上下文和提示词，流式（SSE）或一次性（JSON）返回结果。
 
-use crate::api::{bad_request, content_hash, load_book_data, mark_early_terms, mark_outline_contract, not_found, upstream, ApiResult, AppError};
+use crate::api::{bad_request, content_hash, drop_stale_knowledge, load_book_data, mark_early_terms, mark_outline_contract, not_found, upstream, ApiResult, AppError};
 use crate::db::AiLog;
 use crate::library;
 use crate::llm::{estimate_tokens, extract_json, ChatRequest, LlmClient, LlmEvent, Message, Usage, CANCELLED};
@@ -1244,6 +1244,14 @@ pub async fn json_task(State(st): State<AppState>, Json(req): Json<AiRequest>) -
         if req.task == "chapter_outlines" {
             if let Some(bid) = req.book_id {
                 mark_outline_contract(&load_book_data(&st.db, bid)?, &mut value);
+            }
+        }
+        if req.task == "extract" {
+            if let (Some(bid), Some(cid)) = (req.book_id, req.chapter_id) {
+                let d = load_book_data(&st.db, bid)?;
+                if let Some(c) = d.chapter(cid) {
+                    drop_stale_knowledge(&d, c, &mut value);
+                }
             }
         }
         if req.task == "logic_check" {

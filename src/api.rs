@@ -837,6 +837,28 @@ pub fn mark_outline_contract(d: &BookData, plan: &mut Value) {
     }
 }
 
+/// 人物知情的备注里出现这些说法，说明他还没弄明白真相
+const NOT_KNOWING: [&str; 10] = ["一无所知", "蒙在鼓里", "并不知", "尚不知", "仍不知", "并不清楚", "尚不清楚", "不知道真相", "不知真相", "不明真相"];
+
+/// 定稿提取的人物知情去掉两种不该记的：写本章之前已经知道、这一章又说他知道的（没有变化，记下来反倒把
+/// 「本来就知道」改成「第N章才知道」）；标成知道、备注里却写着他还不知道的。误会的不动，误会的备注本来就写他不知道真相。
+pub fn drop_stale_knowledge(d: &BookData, cur: &Chapter, ext: &mut Value) {
+    let Some(items) = ext.get_mut("knowledge").and_then(Value::as_array_mut) else { return };
+    items.retain(|k| {
+        if truthy(&k["misread"]) {
+            return true;
+        }
+        let note = k["note"].as_str().unwrap_or("");
+        if NOT_KNOWING.iter().any(|w| note.contains(w)) {
+            return false;
+        }
+        let who = k["who"].as_str().unwrap_or("").trim();
+        let person = d.entries.iter().find(|e| e.keywords().iter().any(|n| n == who));
+        let before = person.zip(k["id"].as_i64()).and_then(|(e, rid)| d.knowledge_at(e.id, rid, Some(cur)));
+        !before.is_some_and(|prev| !prev.misread)
+    });
+}
+
 /// 本章合同：视角人物、读者已经知道的秘密、本章投放清单、禁区、人物知情、前 10 章的新名词预算，
 /// 都按揭示计划和知情表现算，作者改了计划马上跟着变。
 pub async fn chapter_contract(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
@@ -1495,4 +1517,37 @@ pub async fn lint(State(st): State<AppState>, Json(r): Json<LintRequest>) -> Api
         }
     }
     Ok(Json(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_drops_knowledge_without_change_or_with_denial() {
+        let chapters = (1..=3).map(|id| Chapter { id, book_id: 1, title: format!("第{id}章"), ..Default::default() }).collect();
+        let entries = vec![
+            Entry { id: 1, name: "陈渊".into(), kind: "character".into(), ..Default::default() },
+            Entry { id: 2, name: "赵崇山".into(), kind: "character".into(), ..Default::default() },
+            Entry { id: 3, name: "裴少卿".into(), kind: "character".into(), aliases: "裴执事".into(), ..Default::default() },
+        ];
+        let mut d = BookData::new(Book { id: 1, ..Default::default() }, vec![], chapters, entries, vec![], vec![]);
+        let k = |id, entry_id, chapter_id: Option<i64>, misread| Knowledge { id, reveal_id: 6, entry_id, chapter_id, misread, ..Default::default() };
+        d.knowledge = vec![k(1, 3, None, false), k(2, 2, None, true), k(3, 1, Some(3), false)];
+        let mut ext = json!({ "knowledge": [
+            { "who": "裴执事", "id": 6, "misread": false, "note": "推断赵崇山侵吞天寿税" },
+            { "who": "赵崇山", "id": 6, "misread": "false", "note": "听裴少卿说出天寿税的去向" },
+            { "who": "赵崇山", "id": 6, "misread": true, "note": "以为只是规矩森严，不知道真相" },
+            { "who": "陈渊", "id": 6, "misread": false, "note": "听到核验天寿税；但天寿税送往何处，他一无所知" },
+            { "who": "陈渊", "id": 6, "misread": false, "note": "亲眼看见寿元被抽走" },
+            { "who": "没这个人", "id": 6, "misread": false, "note": "知道了" }
+        ]});
+        drop_stale_knowledge(&d, d.chapter(2).unwrap(), &mut ext);
+        let kept: Vec<&str> = ext["knowledge"].as_array().unwrap().iter().map(|k| k["note"].as_str().unwrap()).collect();
+        assert_eq!(
+            kept,
+            vec!["听裴少卿说出天寿税的去向", "以为只是规矩森严，不知道真相", "亲眼看见寿元被抽走", "知道了"],
+            "开篇前就知道又说知道的、备注里说他不知道的去掉；原来误会现在知道的、误会的、第3章才知道的、对不上人的留着"
+        );
+    }
 }
