@@ -616,6 +616,38 @@ pub fn build(req: &AiRequest, data: Option<&BookData>, s: &Settings, ov: &HashMa
             p.temperature = Some(s.analyst.temperature.min(0.3));
             Ok(p)
         }
+        "opening_check" => {
+            let d = need(data)?;
+            let last = req
+                .chapter_id
+                .and_then(|id| d.position(id))
+                .or_else(|| d.chapters.iter().rposition(|c| !c.content.trim().is_empty()))
+                .ok_or_else(|| bad_request("还没有写好的章节"))?;
+            let written: Vec<_> = d.chapters[..=last].iter().filter(|c| !c.content.trim().is_empty() && d.number(c).is_some_and(|n| n <= 30)).collect();
+            let upto = written.last().and_then(|c| d.number(c)).ok_or_else(|| bad_request("前 30 章里还没有写好的章节"))?;
+            let summaries: Vec<String> = written
+                .iter()
+                .map(|c| format!("{}：{}", d.label(c), if c.summary.trim().is_empty() { clip(&c.content, 300) } else { c.summary.trim().to_string() }))
+                .collect();
+            let mut info = format!("【作品】{}", d.book.title);
+            if !d.book.genre.is_empty() {
+                info += &format!("（{}）", d.book.genre);
+            }
+            if !d.book.logline.is_empty() {
+                info += &format!("\n【一句话梗概】{}", d.book.logline);
+            }
+            if !d.book.golden_finger.trim().is_empty() {
+                info += &format!("\n【金手指】{}", d.book.golden_finger.trim());
+            }
+            let milestones: Vec<String> = prompts::OPENING_MILESTONES.iter().map(|(_, end, m)| format!("· {m}（截止第 {end} 章）")).collect();
+            let mut v = Vars::new();
+            v.insert("platform", prompts::platform_name(&d.book.platform).to_string());
+            v.insert("info", info);
+            v.insert("milestones", milestones.join("\n"));
+            v.insert("upto", upto.to_string());
+            v.insert("summaries", clip(&summaries.join("\n"), 12000));
+            Ok(prepared(Role::Analyst, render_id("system.analyst", &Vars::new(), ov), "task.opening_check", &v, true))
+        }
         "summarize" | "extract" | "check" | "review" | "tension" | "first_read" | "revision_plan" => {
             let d = need(data)?;
             let c = req.chapter_id.and_then(|id| d.chapter(id)).ok_or_else(|| not_found("章节"))?;

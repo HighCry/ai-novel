@@ -466,6 +466,7 @@ function checkPanel(body) {
       h('button', { class: 'btn', onclick: needChapter(runReview) }, '编辑审稿打分（AI）'),
       h('button', { class: 'btn', onclick: needChapter((o) => runText(o, 'first_read', '冷读者反馈：一个没看过设定的读者怎么看这一章')) }, '冷读者反馈（AI）'),
       h('button', { class: 'btn', onclick: needChapter((o) => runText(o, 'revision_plan', '修订计划', o.dataset.feedback || '')) }, '生成修订计划（AI，会参考下面已有的检查结果）'),
+      h('button', { class: 'btn', onclick: needChapter(runOpening) }, '开篇里程碑核对（AI）：核心规则、设定回收、设定引擎'),
       h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, () => runSubmission(out), '检查中…') }, '全书投稿检查')),
     lastLogic(ch, out),
     out);
@@ -620,6 +621,23 @@ async function runConsistency(out) {
       it.quote ? h('blockquote', null, it.quote) : null,
       h('div', { class: 'small' }, it.problem),
       it.suggestion ? h('div', { class: 'small muted' }, '建议：' + it.suggestion) : null));
+  }
+}
+
+/** 按第 1 章到当前章的摘要，逐条核对开篇里程碑 */
+async function runOpening(out) {
+  const r = await api.post('/ai/json', { task: 'opening_check', book_id: store.book.id, chapter_id: store.chapter.id });
+  out.innerHTML = '';
+  const items = r.milestones || [];
+  out.append(h('div', { class: 'score-line' }, h('b', null, '开篇里程碑核对')));
+  if (!items.length) out.append(empty('模型没有返回结果，请重试'));
+  for (const m of items) {
+    const state = m.done ? '做到了' : m.pending ? '还没到截止章节' : '没做到';
+    out.append(h('div', { class: 'issue ' + (m.done ? 'low' : m.pending ? 'medium' : 'high') },
+      h('div', { class: 'issue-head' }, h('span', { class: 'tag' }, state), m.chapter ? h('span', { class: 'small muted' }, `第${m.chapter}章`) : null),
+      h('div', null, m.title || ''),
+      m.evidence ? h('div', { class: 'small' }, m.evidence) : null,
+      m.suggestion ? h('div', { class: 'small muted' }, '补法：' + m.suggestion) : null));
   }
 }
 

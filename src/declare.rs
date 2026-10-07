@@ -27,7 +27,7 @@ const CATEGORIES: &[(&str, &str, &[&str])] = &[
         "分析与检查",
         "生成章节摘要、核对设定前后是否一致、分析节奏，不产生正文",
         &[
-            "summarize", "extract", "check", "logic_check", "review", "tension", "volume_summary", "revision_plan", "first_read", "style_profile", "library_analyze",
+            "summarize", "extract", "check", "logic_check", "review", "tension", "volume_summary", "revision_plan", "first_read", "opening_check", "style_profile", "library_analyze",
             "style_distill", "teardown", "preference",
         ],
     ),

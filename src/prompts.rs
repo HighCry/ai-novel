@@ -467,6 +467,18 @@ const STYLE_PROFILE: &str = "下面是作者提供的样章和本地统计的文
 
 要求：分条写，每条一句话，覆盖：叙述视角和人称、句子长短和节奏、对话占比和对话风格、用词偏好（口语还是书面、是否爱用成语）、描写的侧重（动作/心理/环境）、情绪基调、段落习惯。8 条以内，不要空泛的形容，直接输出条目。";
 
+const OPENING_CHECK: &str = "请以{{platform}}责任编辑的视角，核对这本书的开篇有没有做到下面几条里程碑。只看已经写出来的部分（下面是第 1 章到第 {{upto}} 章的摘要），不要替作者设想后面会怎么写。
+
+{{info}}
+【开篇里程碑】
+{{milestones}}
+
+【各章摘要】
+{{summaries}}
+
+逐条判断：做到了 done 写 true，chapter 写最早做到的章号；没做到 done 写 false，还没到截止章节的 pending 写 true。evidence 用一句话说靠哪一章的什么做到的，没做到就说缺了什么；suggestion 给一条具体的补法（放在哪一章、怎么写），做到了留空。只输出 JSON，格式：
+{\"milestones\":[{\"title\":\"里程碑原文\",\"done\":true,\"pending\":false,\"chapter\":5,\"evidence\":\"一句话\",\"suggestion\":\"\"}]}";
+
 const FIRST_READ: &str = "你是一个第一次看这本书的普通读者，平时在{{platform}}上看{{genre}}小说。下面是其中一章，你没有看过任何设定和大纲。请像真实读者一样说说读后感：
 1. 读到哪里开始被吸引，哪里觉得拖沓、想跳过（引用原文片段）
 2. 哪些地方没看懂，人物关系或设定让你困惑
@@ -822,6 +834,14 @@ pub const TEMPLATES: &[Template] = &[
         text: REVISION_PLAN,
     },
     Template {
+        id: "task.opening_check",
+        name: "开篇里程碑核对",
+        group: "分析",
+        description: "按已写章节的摘要核对开篇里程碑：验证核心规则、设定回收、设定引擎成型",
+        vars: &[V_PLATFORM, ("info", "作品信息和金手指"), ("milestones", "开篇里程碑和截止章节"), ("upto", "核对到第几章"), ("summaries", "各章摘要")],
+        text: OPENING_CHECK,
+    },
+    Template {
         id: "task.simulate",
         name: "人物推演",
         group: "规划",
@@ -932,14 +952,16 @@ pub fn opening_plan(from: i64, to: i64) -> String {
             crate::logic::new_term_limit(Some(4))
         ));
     }
-    let milestones = [
-        (3, 6, "第 3～6 章：让读者看懂并验证一次核心规则（金手指或力量体系怎么用、要付什么代价）"),
-        (1, 10, "第 10 章前：至少一次设定回收——前面出现过的规则、物品、禁忌变成爽点或危机的解法"),
-        (1, 30, "第 30 章前：设定引擎成型，读者心里有数主角靠什么成长、往哪里走"),
-    ];
-    lines.extend(milestones.iter().filter(|(a, b, _)| from <= *b && to >= *a).map(|(_, _, m)| m.to_string()));
+    lines.extend(OPENING_MILESTONES.iter().filter(|(a, b, _)| from <= *b && to >= *a).map(|(_, _, m)| m.to_string()));
     if lines.is_empty() { String::new() } else { format!("【开篇要求】\n{}", lines.join("\n")) }
 }
+
+/// 开篇里程碑：从第几章到第几章之间要做到什么。章纲规划时进提示词，写完后由开篇里程碑核对按摘要逐条判断
+pub const OPENING_MILESTONES: [(i64, i64, &str); 3] = [
+    (3, 6, "第 3～6 章：让读者看懂并验证一次核心规则（金手指或力量体系怎么用、要付什么代价）"),
+    (1, 10, "第 10 章前：至少一次设定回收——前面出现过的规则、物品、禁忌变成爽点或危机的解法"),
+    (1, 30, "第 30 章前：设定引擎成型，读者心里有数主角靠什么成长、往哪里走"),
+];
 
 #[derive(Default)]
 pub struct Brief {
