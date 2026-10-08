@@ -87,15 +87,31 @@ Write-Host '[6/8] zipalign 对齐'
 & (Join-Path $BT 'zipalign.exe') -f -p 4 "$B\unsigned.apk" "$B\aligned.apk"
 if ($LASTEXITCODE) { throw 'zipalign 失败' }
 
-Write-Host '[7/8] 调试签名'
-$ks = Join-Path $ROOT 'debug.keystore'
-if (!(Test-Path $ks)) {
-    & (Join-Path $JAVA 'bin\keytool.exe') -genkeypair -keystore $ks -storepass android -keypass android `
-        -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=AI Novel Debug, O=ai-novel, C=CN'
-    if ($LASTEXITCODE) { throw 'keytool 生成调试证书失败' }
+Write-Host '[7/8] 签名'
+# 有 release.keystore 且设了口令环境变量就正式签名，否则回落到调试签名。
+# release.keystore 已 .gitignore，口令只从环境变量读（AI_NOVEL_RELEASE_STOREPASS/_KEYPASS/_ALIAS），不写进仓库。
+$relKs = Join-Path $ROOT 'release.keystore'
+if ((Test-Path $relKs) -and $env:AI_NOVEL_RELEASE_STOREPASS) {
+    $signKind  = 'release'
+    $ks        = $relKs
+    $alias     = if ($env:AI_NOVEL_RELEASE_ALIAS) { $env:AI_NOVEL_RELEASE_ALIAS } else { 'ainovel' }
+    $storePass = $env:AI_NOVEL_RELEASE_STOREPASS
+    $keyPass   = if ($env:AI_NOVEL_RELEASE_KEYPASS) { $env:AI_NOVEL_RELEASE_KEYPASS } else { $storePass }
+} else {
+    $signKind  = '调试'
+    $ks        = Join-Path $ROOT 'debug.keystore'
+    $alias     = 'androiddebugkey'
+    $storePass = 'android'
+    $keyPass   = 'android'
+    if (!(Test-Path $ks)) {
+        & (Join-Path $JAVA 'bin\keytool.exe') -genkeypair -keystore $ks -storepass android -keypass android `
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=AI Novel Debug, O=ai-novel, C=CN'
+        if ($LASTEXITCODE) { throw 'keytool 生成调试证书失败' }
+    }
 }
+Write-Host "    使用 $signKind 证书：$ks（别名 $alias）"
 $out = Join-Path $B "$NAME.apk"
-& (Join-Path $BT 'apksigner.bat') sign --ks $ks --ks-pass pass:android --key-pass pass:android --min-sdk-version 24 --out $out "$B\aligned.apk"
+& (Join-Path $BT 'apksigner.bat') sign --ks $ks --ks-key-alias $alias --ks-pass "pass:$storePass" --key-pass "pass:$keyPass" --min-sdk-version 24 --out $out "$B\aligned.apk"
 if ($LASTEXITCODE) { throw 'apksigner 签名失败' }
 
 Write-Host '[8/8] 校验、复制并归档'
@@ -127,7 +143,7 @@ $info = @(
     "源码提交    $commit",
     "构建时间    $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')",
     "APK SHA256  $sha",
-    "签名证书    $dn（调试证书，仅供自用侧载，不能上架应用商店）",
+    "签名证书    $dn（$(if ($signKind -eq 'release') { '正式证书，可用于分发/上架' } else { '调试证书，仅供自用侧载，不能上架应用商店' })）",
     "证书SHA256  $certSha"
 )
 [System.IO.File]::WriteAllText((Join-Path $rel 'build-info.txt'), (($info -join "`n") + "`n"), $utf8)
